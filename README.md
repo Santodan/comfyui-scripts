@@ -2,6 +2,6 @@ Just some scripts that I used with comfyui
 
 
 
-- to install Cystools in PyTorch / ZLUDA
-  Inside the ven ( `venv/Scripts/activae` )
-  `pip install pynvml-amd-windows`
+## To install Cystools in PyTorch / ZLUDA <br>
+Inside the `venv` ( `venv/Scripts/activae` ) <br>
+`pip install pynvml-amd-windows`
