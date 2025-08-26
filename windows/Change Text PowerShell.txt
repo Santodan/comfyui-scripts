@@ -1,0 +1,25 @@
+get-childitem * | rename-item -newname { [string]($_.name).substring(4) }
+
+ls | Rename-Item -NewName {$_.name -replace "Five Finger Death Punch -  ","Five Finger Death Punch - "}
+ls | Rename-Item -NewName { $_.Name + ".log"};
+ls | Rename-Item -NewName { "Slaughter To Prevail -  + $_.Name};
+Get-ChildItem | Rename-Item -NewName { "Bob Vylan - " + $_.Name }
+
+
+Get-ChildItem * | rename-item -NewName {$_.name.substring(0,$_.BaseName.length-3)}
+
+----
+
+Uppercase first letter:
+
+Get-ChildItem -File | Rename-Item -NewName { "{0}{1}" -f ( Get-Culture ).TextInfo.ToTitleCase( $_.BaseName.ToLower() ), $_.Extension}
+
+----
+
+Increment
+
+Get-ChildItem -File | Sort-Object Name | ForEach-Object -Begin { $i = 0 } -Process {
+    $newName = "Chroma-Noise_{0:D5}{1}" -f $i, $_.Extension
+    Rename-Item $_.FullName -NewName $newName
+    $i++
+}
