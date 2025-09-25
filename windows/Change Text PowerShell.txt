@@ -3,23 +3,71 @@ get-childitem * | rename-item -newname { [string]($_.name).substring(4) }
 ls | Rename-Item -NewName {$_.name -replace "Five Finger Death Punch -  ","Five Finger Death Punch - "}
 ls | Rename-Item -NewName { $_.Name + ".log"};
 ls | Rename-Item -NewName { "Slaughter To Prevail -  + $_.Name};
-Get-ChildItem | Rename-Item -NewName { "Bob Vylan - " + $_.Name }
+Get-ChildItem | Rename-Item -NewName { "Ho99o9 - " + $_.Name }
 
 
 Get-ChildItem * | rename-item -NewName {$_.name.substring(0,$_.BaseName.length-3)}
 
-----
+===================================================================================
 
-Uppercase first letter:
+- Uppercase first letter:
 
 Get-ChildItem -File | Rename-Item -NewName { "{0}{1}" -f ( Get-Culture ).TextInfo.ToTitleCase( $_.BaseName.ToLower() ), $_.Extension}
 
-----
+===================================================================================
 
-Increment
+- Lower Case:
+
+Get-ChildItem -File | Rename-Item -NewName { "{0}{1}" -f ($_.BaseName.ToLower() ), $_.Extension }
+Get-ChildItem -File | Rename-Item -NewName { $_.Name.Replace("_x","") }
+
+===================================================================================
+
+- Recursively rename all files to lowercase:
+
+Get-ChildItem -File -Recurse | Rename-Item -NewName { 
+    "{0}{1}" -f ($_.BaseName.ToLower()), $_.Extension 
+}
+
+===================================================================================
+
+ - Search for space, dot, hyphen, if it exists, replace it for _ and lowercase:
+ 
+Get-ChildItem -Recurse -File | ForEach-Object {
+    $name = $_.BaseName -replace '[ .-]', '_'   # replace space, dot, hyphen
+    $ext  = $_.Extension.ToLower()              # ensure extension is lowercase too
+    $newName = ("$name$ext").ToLower()          # full lowercase filename
+
+    if ($_.Name -ne $newName) {
+        $tempName = [System.IO.Path]::GetRandomFileName() + $ext
+        Rename-Item -Path $_.FullName -NewName $tempName -Force
+        Rename-Item -Path (Join-Path $_.DirectoryName $tempName) -NewName $newName -Force
+        Write-Host "Renamed '$($_.FullName)' -> '$newName'"
+    }
+}
+
+===================================================================================
+
+- Always change to lower case and also replace space, dot and hypehn for underscore:
+
+Get-ChildItem -Recurse -File | ForEach-Object {
+    $name    = $_.BaseName -replace '[ .-]', '_'   # replace space, dot, hyphen
+    $ext     = $_.Extension.ToLower()              # lowercase extension
+    $newName = ("$name$ext").ToLower()             # lowercase full name
+
+    $tempName = [System.IO.Path]::GetRandomFileName() + $ext
+    Rename-Item -Path $_.FullName -NewName $tempName -Force
+    Rename-Item -Path (Join-Path $_.DirectoryName $tempName) -NewName $newName -Force
+
+    Write-Host "Renamed '$($_.FullName)' -> '$newName'"
+}
+
+===================================================================================
+
+- Increment:
 
 Get-ChildItem -File | Sort-Object Name | ForEach-Object -Begin { $i = 0 } -Process {
-    $newName = "Chroma-Noise_{0:D5}{1}" -f $i, $_.Extension
+    $newName = "Chroma_{0:D5}{1}" -f $i, $_.Extension
     Rename-Item $_.FullName -NewName $newName
     $i++
 }
