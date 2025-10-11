@@ -1,7 +1,7 @@
 @echo off
 setlocal
 
-set MAIN_DIR=D:\AI_Generated\ComfyUI-Zluda-Mod
+set MAIN_DIR=D:\AI_Generated\ComfyUI
 
 :: Wildcards
 Echo === Symlink Wildcards ===
@@ -37,6 +37,12 @@ mklink /D "%target_dir%" "%source_dir%"
 Echo === Symlink Workflow ===
 set "source_dir=D:\AI_Generated\Workflows"
 set "target_dir=%MAIN_DIR%\user\default\workflows"
+:: Ensure parent folder exists
+for %%A in ("%target_dir%") do set "parent_dir=%%~dpA"
+if not exist "%parent_dir%" (
+    echo Creating missing parent directories...
+    mkdir "%parent_dir%"
+)
 if exist "%target_dir%" (
     echo Deleting existing %target_dir%
     rmdir /S /Q "%target_dir%"
