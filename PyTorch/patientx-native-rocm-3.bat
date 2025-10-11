@@ -101,7 +101,8 @@ if %ERRLEVEL% neq 0 (
 :: Step 2: Clone ComfyUI
 if not exist "%COMFYUI_DIR%" (
     echo Cloning ComfyUI...
-    git clone https://github.com/comfyanonymous/ComfyUI.git "%COMFYUI_DIR%"
+    ::git clone https://github.com/comfyanonymous/ComfyUI.git "%COMFYUI_DIR%"
+	git clone https://github.com/maifeeulasad/ComfyUI.git "%COMFYUI_DIR%"
     set ERRLEVEL=%errorlevel%
     if %ERRLEVEL% neq 0 (
         echo "Failed to clone ComfyUI repository. Ensure %COMFYUI_DIR% does not exist, and that git is installed from https://git-scm.com/download/win."
@@ -350,7 +351,55 @@ echo git pull >> "%RUN_SCRIPT%"
 echo pip install -U comfyui-frontend-package comfyui-workflow-templates av comfyui-embedded-docs --quiet >> "%RUN_SCRIPT%"
 echo python main.py --use-quad-cross-attention >> "%RUN_SCRIPT%"
 
-:: Step 15: Final Message
+:: Step 15: Clone Manager
+cd %COMFYUI_DIR%\custom_nodes\
+git clone https://github.com/Comfy-Org/ComfyUI-Manager
+
+:: Step 16: Symlinck things
+set MAIN_DIR=%COMFYUI_DIR%
+
+:: Wildcards
+Echo === Symlink Wildcards ===
+set "source_dir=D:\AI_Generated\Wildcards"
+set "target_dir=%MAIN_DIR%\Wildcards"
+if exist "%target_dir%" (
+    echo Deleting existing %target_dir%
+    rmdir /S /Q "%target_dir%"
+)
+mklink /D "%target_dir%" "%source_dir%"
+
+:: Models
+Echo === Symlink Models ===
+set "source_dir=D:\AI_Generated\comfyui_models"
+set "target_dir=%MAIN_DIR%\models"
+if exist "%target_dir%" (
+    echo Deleting existing %target_dir%
+    rmdir /S /Q "%target_dir%"
+)
+mklink /D "%target_dir%" "%source_dir%"
+
+:: Output
+Echo === Symlink Output ===
+set "source_dir=D:\AI_Generated\Generated\ComfyUI"
+set "target_dir=%MAIN_DIR%\output"
+if exist "%target_dir%" (
+    echo Deleting existing %target_dir%
+    rmdir /S /Q "%target_dir%"
+)
+mklink /D "%target_dir%" "%source_dir%"
+
+:: Workflow
+Echo === Symlink Workflow ===
+set "source_dir=D:\AI_Generated\Workflows"
+set "target_dir=%MAIN_DIR%\user\default\workflows"
+if exist "%target_dir%" (
+    echo Deleting existing %target_dir%
+    rmdir /S /Q "%target_dir%"
+)
+mklink /D "%target_dir%" "%source_dir%"
+
+
+:: Step 17: Final Message
 echo.
 echo Done.
 echo You can now launch ComfyUI using patientx's launch script (actually that doesn't seem to be working very well, but run it once because it sets up the front end libraries:
