@@ -124,5 +124,6 @@ set PATH=D:\AI_Generated\hip65\rocm;D:\AI_Generated\hip65\bin;D:\AI_Generated\hi
 git pull
 
 :: silently check and update packages
-pip install -U comfyui-frontend-package comfyui-workflow-templates av comfyui-embedded-docs --quiet
+pip install -U comfyui-frontend-package==1.28.7 comfyui-workflow-templates av comfyui-embedded-docs --quiet
+
 python main.py %COMMANDLINE_ARGS%
