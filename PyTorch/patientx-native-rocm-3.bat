@@ -102,7 +102,8 @@ if %ERRLEVEL% neq 0 (
 if not exist "%COMFYUI_DIR%" (
     echo Cloning ComfyUI...
     ::git clone https://github.com/comfyanonymous/ComfyUI.git "%COMFYUI_DIR%"
-	git clone https://github.com/maifeeulasad/ComfyUI.git "%COMFYUI_DIR%"
+	::git clone https://github.com/maifeeulasad/ComfyUI.git "%COMFYUI_DIR%"
+	git clone --branch v0.3.65 --single-branch https://github.com/comfyanonymous/ComfyUI.git "%COMFYUI_DIR%"
     set ERRLEVEL=%errorlevel%
     if %ERRLEVEL% neq 0 (
         echo "Failed to clone ComfyUI repository. Ensure %COMFYUI_DIR% does not exist, and that git is installed from https://git-scm.com/download/win."
@@ -151,7 +152,7 @@ if %ERRLEVEL% neq 0 (
     echo https://github.com/lshqqytiger/TheRock/releases/download/build0/torchvision-0.22.0+rocm6.5.unofficial-cp311-cp311-win_amd64.whl
     echo https://github.com/lshqqytiger/triton/releases/download/a9c80202/triton-3.4.0+gita9c80202-cp311-cp311-win_amd64.whl
     echo https://raw.githubusercontent.com/patientx/ComfyUI-Zluda/master/comfy/customzluda/fa/flash_attn-2.7.4.post1-py3-none-any.whl
-    echo sageattention
+    echo sageattention==1.0.6
 ) > extra-requirements.txt
 
 pip install -r extra-requirements.txt
@@ -348,7 +349,7 @@ echo set MIOPEN_LOG_LEVEL=3 >> "%RUN_SCRIPT%"
 echo set MIOPEN_DEBUG_CONV_DIRECT_NAIVE_CONV_FWD=0 >> "%RUN_SCRIPT%"
 echo set PATH=%HIP_SDK_DIR%\bin;%%PATH%% >> "%RUN_SCRIPT%"
 echo git pull >> "%RUN_SCRIPT%"
-echo pip install -U comfyui-frontend-package comfyui-workflow-templates av comfyui-embedded-docs --quiet >> "%RUN_SCRIPT%"
+echo pip install -U comfyui-frontend-package==1.28.7 comfyui-workflow-templates av comfyui-embedded-docs --quiet >> "%RUN_SCRIPT%"
 echo python main.py --use-quad-cross-attention >> "%RUN_SCRIPT%"
 
 :: Step 15: Clone Manager
@@ -392,6 +393,12 @@ mklink /D "%target_dir%" "%source_dir%"
 Echo === Symlink Workflow ===
 set "source_dir=D:\AI_Generated\Workflows"
 set "target_dir=%MAIN_DIR%\user\default\workflows"
+:: Ensure parent folder exists
+for %%A in ("%target_dir%") do set "parent_dir=%%~dpA"
+if not exist "%parent_dir%" (
+    echo Creating missing parent directories...
+    mkdir "%parent_dir%"
+)
 if exist "%target_dir%" (
     echo Deleting existing %target_dir%
     rmdir /S /Q "%target_dir%"
