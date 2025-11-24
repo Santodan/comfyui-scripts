@@ -58,7 +58,7 @@ try:
 except ImportError:
     TORCH_AVAILABLE = False
 
-# --- CONFIGURATION GROUPS ---
+# --- CONFIGURATION GROUPS (UI Layout) ---
 QUANT_GROUPS = [
     ["F16", "BF16"],
     ["IQ2_XS", "IQ2_S"],
@@ -122,52 +122,28 @@ else:
 
 # --- GUI UTILS ---
 class DualOutput:
-    """
-    Captures stdout/stderr. 
-    Handless \r (carriage returns) to update the last line in the GUI 
-    instead of spamming new lines. This makes progress bars look correct.
-    """
     def __init__(self, original_stream, text_widget):
         self.original_stream = original_stream
         self.text_widget = text_widget
-
     def write(self, message):
-        # 1. Always write to the real terminal immediately
         self.original_stream.write(message)
-        self.original_stream.flush()
-        
-        # 2. Update GUI safely
-        if message:
-            self.text_widget.after(0, self._update_gui, message)
-
-    def _update_gui(self, message):
-        try:
-            self.text_widget.configure(state='normal')
-            
-            # If the message contains a carriage return, it's likely a progress bar update.
-            if '\r' in message:
-                # Split by \r. The last non-empty part is usually the current status.
-                parts = message.split('\r')
-                # We want the last part that has content
-                content = parts[-1]
-                
-                if content:
-                    # "end-1c linestart" moves to the start of the last line of text.
-                    # "end-1c" is the very end of the text (before the final newline).
-                    # We delete the current last line and replace it.
-                    self.text_widget.delete("end-1c linestart", "end-1c")
-                    self.text_widget.insert("end", content)
-            else:
-                # Standard print, just append.
-                self.text_widget.insert("end", message)
-
-            self.text_widget.see("end")
-            self.text_widget.configure(state='disabled')
-        except Exception:
-            pass
-
-    def flush(self):
-        self.original_stream.flush()
+        if message.strip() and not message.startswith('\r'): 
+            def update():
+                try:
+                    self.text_widget.configure(state='normal')
+                    if '\r' in message:
+                        parts = message.split('\r')
+                        content = parts[-1]
+                        if content:
+                            self.text_widget.delete("end-1c linestart", "end")
+                            self.text_widget.insert("end", content)
+                    else:
+                        self.text_widget.insert("end", message)
+                    self.text_widget.see("end")
+                    self.text_widget.configure(state='disabled')
+                except: pass
+            self.text_widget.after(0, update)
+    def flush(self): self.original_stream.flush()
 
 class ProgressPopup(tk.Toplevel):
     def __init__(self, parent):
@@ -613,13 +589,29 @@ class ConverterApp:
         self.stop_requested = False
         steps = []
         
-        # Determine which types need generating or just uploading
-        active_quants = list(set(gen + up_only))
+        # --- LOGICAL SORT ORDER FOR PROGRESS GRID ---
+        # Explicit sort order: Lowest Bitrate -> Highest Bitrate -> FP8
+        SORT_ORDER = [
+            "IQ2_XS", "IQ2_S", "Q2_K",
+            "IQ3_XXS", "IQ3_S", "IQ3_M", "Q3_K_S", "Q3_K_M", "Q3_K_L",
+            "IQ4_NL", "IQ4_XS", "Q4_0", "Q4_K_S", "Q4_K_M",
+            "Q5_0", "Q5_K_S", "Q5_K_M",
+            "Q6_K", "Q8_0",
+            "BF16", "F16",
+            "FP8_E4M3FN", "FP8_E4M3FN (All)",
+            "FP8_E5M2", "FP8_E5M2 (All)"
+        ]
         
-        fp8_variants = ["FP8_E5M2", "FP8_E5M2 (All)"]
-        # If we have any non-FP8 quants that need generation, add Prep
-        # If we only have upload for GGUF, we don't need Prep logic inside processing loop usually, but kept for safety
-        if any(q not in fp8_variants for q in gen): steps.append("GGUF Prep")
+        active_quants = list(set(gen + up_only))
+        # Sort active_quants based on SORT_ORDER index, putting unknowns at end
+        active_quants.sort(key=lambda x: SORT_ORDER.index(x) if x in SORT_ORDER else 999)
+
+        fp8_variants = ["FP8_E5M2", "FP8_E5M2 (All)", "FP8_E4M3FN", "FP8_E4M3FN (All)"]
+        
+        # Add Prep step if we are GENERATING any GGUF
+        gguf_gen_needed = [q for q in gen if q not in fp8_variants]
+        if gguf_gen_needed:
+            steps.append("GGUF Prep")
         
         for q in active_quants: steps.append(q)
         if self.do_upload.get(): steps.append("Upload")
@@ -637,6 +629,7 @@ class ConverterApp:
         try:
             strategy = self.cleanup_mode.get()
             keep_list = [q for q, v in self.quant_vars_keep.items() if v.get()]
+            up_list = [q for q, v in self.quant_vars_up.items() if v.get()]
             out_mode = self.out_mode_var.get()
             up_mode = self.upload_mode_var.get()
             
@@ -663,20 +656,22 @@ class ConverterApp:
                 generated_files = []
 
                 # --- FP8 Logic ---
-                for q in ["FP8_E5M2", "FP8_E5M2 (All)"]:
-                    # Check if we need to process this quant (Generate OR Upload)
+                fp8_targets = ["FP8_E5M2", "FP8_E5M2 (All)", "FP8_E4M3FN", "FP8_E4M3FN (All)"]
+                for q in fp8_targets:
                     if q in gen_list or q in up_list:
                         if self.stop_requested: break
                         self.msg_queue.put(("UPDATE_GRID", model_base, q, "RUNNING"))
                         
                         suffix = "_All" if "All" in q else ""
-                        expected_path = os.path.join(out_dir, f"{name}-FP8_E5M2{suffix}.safetensors")
+                        base_q_name = q.split(" ")[0] # FP8_E5M2
+                        expected_path = os.path.join(out_dir, f"{name}-{base_q_name}{suffix}.safetensors")
                         
                         # Case 1: Generate
                         if q in gen_list:
                             try:
                                 if TORCH_AVAILABLE:
-                                    qzer = FP8Quantizer("float8_e5m2")
+                                    dtype_str = "float8_e5m2" if "E5M2" in q else "float8_e4m3fn"
+                                    qzer = FP8Quantizer(dtype_str)
                                     ok = qzer.apply_quantization_to_file(f, expected_path, unet_only=("All" not in q), check_stop_func=lambda: self.stop_requested)
                                     if ok: 
                                         generated_files.append(expected_path)
@@ -687,7 +682,7 @@ class ConverterApp:
                                 logging.error(f"FP8 Err: {e}")
                                 self.msg_queue.put(("UPDATE_GRID", model_base, q, "ERROR"))
                         
-                        # Case 2: Upload Only (Generate is False, but Up is True)
+                        # Case 2: Upload Only
                         elif q in up_list:
                             if os.path.exists(expected_path):
                                 logging.info(f"Found existing file for upload: {os.path.basename(expected_path)}")
@@ -697,12 +692,12 @@ class ConverterApp:
                                 logging.warning(f"File not found for upload: {expected_path}")
                                 self.msg_queue.put(("UPDATE_GRID", model_base, q, "SKIP"))
 
-
                 # --- GGUF Logic ---
-                gguf_quants_active = [q for q in (gen_list + up_list) if "FP8" not in q]
+                # Filter active GGUF quants (Gen or Up)
+                all_gguf_active = [q for q in (gen_list + up_list) if "FP8" not in q]
                 
-                if gguf_quants_active:
-                    # Only run prep if we actually need to generate something
+                if all_gguf_active:
+                    # Check if we need to generate source (only if generating at least one GGUF)
                     gguf_gen_needed = [q for q in gen_list if "FP8" not in q]
                     
                     gguf_src = None
@@ -728,7 +723,7 @@ class ConverterApp:
                         else: self.msg_queue.put(("UPDATE_GRID", model_base, "GGUF Prep", "ERROR"))
                     
                     # Process Quants
-                    for q in gguf_quants_active:
+                    for q in all_gguf_active:
                         if self.stop_requested: break
                         self.msg_queue.put(("UPDATE_GRID", model_base, q, "RUNNING"))
                         
@@ -800,8 +795,17 @@ class ConverterApp:
             self.btn_run.config(state="normal")
 
     def _check_file_match_quant(self, fname, q):
-        if q == "FP8_E5M2 (All)": return "FP8_E5M2_All" in fname
-        if q == "FP8_E5M2": return ("FP8_E5M2" in fname and "All" not in fname)
+        if "FP8" in q:
+            # q is "FP8_E5M2" or "FP8_E5M2 (All)"
+            # fname is "...-FP8_E5M2.safetensors" or "...-FP8_E5M2_All.safetensors"
+            base_q = q.split(" ")[0] # FP8_E5M2
+            is_all_q = "(All)" in q
+            
+            if is_all_q:
+                return (base_q in fname and "_All" in fname)
+            else:
+                return (base_q in fname and "_All" not in fname)
+        
         if q in ["F16", "BF16"]: return f"-{q}.gguf" in fname
         return f"-{q}.gguf" in fname
 
