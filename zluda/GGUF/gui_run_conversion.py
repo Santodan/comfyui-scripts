@@ -58,7 +58,7 @@ try:
 except ImportError:
     TORCH_AVAILABLE = False
 
-# --- CONFIGURATION GROUPS (UI Layout) ---
+# --- CONFIGURATION GROUPS ---
 QUANT_GROUPS = [
     ["F16", "BF16"],
     ["IQ2_XS", "IQ2_S"],
@@ -198,7 +198,7 @@ class ProgressPopup(tk.Toplevel):
 class ConverterApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("GGUF & FP8 Manager v40")
+        self.root.title("GGUF & FP8 Manager v43")
         self.root.geometry("1600x950")
         
         self.msg_queue = queue.Queue()
@@ -231,17 +231,14 @@ class ConverterApp:
         self.logger.setLevel(logging.INFO)
         if self.logger.hasHandlers(): self.logger.handlers.clear()
         formatter = logging.Formatter('%(asctime)s - %(message)s', datefmt='%H:%M:%S')
-        
         ch = logging.StreamHandler(sys.stdout)
         ch.setFormatter(formatter)
         self.logger.addHandler(ch)
-        
         os.makedirs("logs", exist_ok=True)
         ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         fh = logging.FileHandler(f"logs/log_{ts}.log", encoding='utf-8')
         fh.setFormatter(formatter)
         self.logger.addHandler(fh)
-
         class TextHandler(logging.Handler):
             def __init__(self, widget):
                 super().__init__()
@@ -259,41 +256,28 @@ class ConverterApp:
     def _setup_ui(self):
         main_pane = tk.PanedWindow(self.root, orient=tk.VERTICAL, sashwidth=5)
         main_pane.pack(fill="both", expand=True)
-
-        # Config Frame (Scrollable)
         config_frame = tk.Frame(main_pane)
         canvas = Canvas(config_frame)
         scrollbar = ttk.Scrollbar(config_frame, orient="vertical", command=canvas.yview)
         self.content_frame = tk.Frame(canvas)
-        
         self.content_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.bind("<Configure>", lambda e: canvas.itemconfig("inner", width=e.width))
-        
         def on_mousewheel(event):
             if platform.system() == 'Windows': canvas.yview_scroll(int(-1*(event.delta/120)), "units")
             else: canvas.yview_scroll(int(-1*event.delta), "units")
         canvas.bind_all("<MouseWheel>", on_mousewheel)
-
         canvas.create_window((0, 0), window=self.content_frame, anchor="nw", tags="inner")
         canvas.configure(yscrollcommand=scrollbar.set)
-        
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
         main_pane.add(config_frame, height=750)
-
-        # Log Frame Container
         log_container = tk.Frame(main_pane)
         main_pane.add(log_container, minsize=150)
-        
         self.log_display = scrolledtext.ScrolledText(log_container, height=10)
         self.log_display.pack(side="left", fill="both", expand=True)
-        
-        # CLEAR LOG BUTTON
         btn_clear = tk.Button(log_container, text="CLEAR\nLOGS", bg="#eee", command=self.clear_logs)
         btn_clear.pack(side="right", fill="y", padx=2)
 
-        # === WIDGETS ===
-        
         # 1. Environment
         f_env = tk.LabelFrame(self.content_frame, text="1. Environment", padx=5, pady=5, fg="blue")
         f_env.pack(fill="x", padx=5, pady=5)
@@ -302,19 +286,16 @@ class ConverterApp:
         tk.Button(f_env, text="Browse...", command=self.browse_python).pack(side="left", padx=2)
         tk.Button(f_env, text="Restart", command=self.restart).pack(side="left", padx=2)
 
-        # 2. Local Output
+        # 2. Output
         f_mode = tk.LabelFrame(self.content_frame, text="2. Local Output Configuration", padx=5, pady=5)
         f_mode.pack(fill="x", padx=5, pady=5)
         self.out_mode_var = tk.StringVar(value="folder") 
-        
         tk.Label(f_mode, text="Output Strategy:", fg="blue").pack(anchor="w")
         modes_frame = tk.Frame(f_mode)
         modes_frame.pack(fill="x")
         tk.Radiobutton(modes_frame, text="Folder per Model", variable=self.out_mode_var, value="folder", command=self.refresh_file_list_ui).pack(side="left")
         tk.Radiobutton(modes_frame, text="All in One Folder (Flat)", variable=self.out_mode_var, value="flat", command=self.refresh_file_list_ui).pack(side="left")
         tk.Radiobutton(modes_frame, text="Custom Output Path (Per File)", variable=self.out_mode_var, value="custom", command=self.refresh_file_list_ui).pack(side="left")
-
-        # Global Output Dir
         self.global_out_frame = tk.Frame(self.content_frame)
         tk.Label(self.global_out_frame, text="Base Output Dir:").pack(side="left")
         self.out_dir_var = tk.StringVar()
@@ -322,40 +303,30 @@ class ConverterApp:
         tk.Button(self.global_out_frame, text="Browse", command=self.browse_out).pack(side="left")
         self.global_out_frame.pack(fill="x", padx=10, pady=5, after=f_mode) 
 
-        # 3. Files Container
+        # 3. Files
         self.f_files_container = tk.LabelFrame(self.content_frame, text="3. Input Files & Routing Table", padx=5, pady=5)
         self.f_files_container.pack(fill="x", padx=5, pady=5)
-        
         btn_box = tk.Frame(self.f_files_container)
         btn_box.pack(fill="x", pady=2)
         tk.Button(btn_box, text="Add Files...", command=self.add_files, bg="#e6f2ff").pack(side="left", fill="x", expand=True)
         tk.Button(btn_box, text="Clear List", command=self.clear_files).pack(side="left", padx=5)
-
-        # Simple List
         self.simple_list_frame = tk.Frame(self.f_files_container)
         self.file_listbox = tk.Listbox(self.simple_list_frame, height=6, selectmode=tk.EXTENDED)
         self.file_listbox.pack(side="left", fill="x", expand=True)
         self.simple_list_frame.pack(fill="x", expand=True) 
-
-        # Custom Table
         self.local_custom_frame = tk.Frame(self.f_files_container)
 
-        # 4. Quants (Logical Columns with U Column)
+        # 4. Quants
         f_quant = tk.LabelFrame(self.content_frame, text="4. Quantization", padx=5, pady=5)
         f_quant.pack(fill="x", padx=5, pady=5)
-        
         if not TORCH_AVAILABLE: tk.Label(f_quant, text="⚠️ Torch missing. FP8 disabled.", fg="red").grid(row=0, column=0, columnspan=10)
-        
         for col_idx, group in enumerate(QUANT_GROUPS):
             base_col = col_idx * 5  
-            
-            # Header
             tk.Label(f_quant, text="Type", font="Arial 8 bold").grid(row=1, column=base_col, sticky="w")
             tk.Label(f_quant, text="G", font="Arial 8 bold", fg="blue", width=2).grid(row=1, column=base_col+1)
             tk.Label(f_quant, text="U", font="Arial 8 bold", fg="purple", width=2).grid(row=1, column=base_col+2)
             tk.Label(f_quant, text="K", font="Arial 8 bold", fg="green", width=2).grid(row=1, column=base_col+3)
             tk.Label(f_quant, text="|", fg="#ccc").grid(row=1, column=base_col+4, rowspan=10, sticky="ns")
-
             for i, q in enumerate(group):
                 row = i + 2
                 tk.Label(f_quant, text=q).grid(row=row, column=base_col, sticky="w")
@@ -363,10 +334,8 @@ class ConverterApp:
                 self.quant_vars_gen[q] = vg
                 self.quant_vars_up[q] = vu
                 self.quant_vars_keep[q] = vk
-                
                 state = "normal"
                 if "FP8" in q and not TORCH_AVAILABLE: state = "disabled"
-                
                 def sync(g=vg, u=vu, k=vk): 
                     if g.get(): 
                         u.set(True)
@@ -374,56 +343,42 @@ class ConverterApp:
                     else: 
                         u.set(False)
                         k.set(False)
-                
                 tk.Checkbutton(f_quant, variable=vg, command=sync, state=state).grid(row=row, column=base_col+1)
                 tk.Checkbutton(f_quant, variable=vu, state=state).grid(row=row, column=base_col+2)
                 tk.Checkbutton(f_quant, variable=vk, state=state).grid(row=row, column=base_col+3)
 
-        # 5. Upload & Cleanup
+        # 5. Upload
         f_sets = tk.LabelFrame(self.content_frame, text="5. Global Settings & Upload", padx=5, pady=5)
         f_sets.pack(fill="x", padx=5, pady=5)
-        
-        # Enable/Token
         self.do_upload = tk.BooleanVar()
         tk.Checkbutton(f_sets, text="Enable Upload", variable=self.do_upload).grid(row=0, column=0, sticky="w")
-        
         tk.Label(f_sets, text="Token:").grid(row=0, column=1, sticky="e")
         self.hf_token = tk.StringVar(value=os.getenv("HUGGING_FACE_HUB_TOKEN",""))
         tk.Entry(f_sets, textvariable=self.hf_token, show="*").grid(row=0, column=2, columnspan=3, sticky="ew", padx=5)
-        
         ttk.Separator(f_sets, orient="horizontal").grid(row=1, column=0, columnspan=6, sticky="ew", pady=5)
         tk.Label(f_sets, text="Upload Strategy:", fg="purple").grid(row=2, column=0, sticky="e")
         self.upload_mode_var = tk.StringVar(value="global")
         tk.Radiobutton(f_sets, text="Use Global Repos (Below)", variable=self.upload_mode_var, value="global", command=self.refresh_upload_ui).grid(row=2, column=1, columnspan=1, sticky="w")
         tk.Radiobutton(f_sets, text="Custom Repos per File (Table)", variable=self.upload_mode_var, value="custom", command=self.refresh_upload_ui).grid(row=2, column=2, columnspan=2, sticky="w")
-
-        # View A: Global Upload Settings
+        
         self.global_upload_frame = tk.Frame(f_sets)
         self.global_upload_frame.grid(row=3, column=0, columnspan=5, sticky="ew")
-        
         tk.Label(self.global_upload_frame, text="GGUF Repo:", fg="blue").grid(row=0, column=0, sticky="e")
         self.hf_repo_gguf = tk.StringVar()
         tk.Entry(self.global_upload_frame, textvariable=self.hf_repo_gguf).grid(row=0, column=1, sticky="ew", padx=5)
-
         tk.Label(self.global_upload_frame, text="FP8 Repo:", fg="green").grid(row=0, column=2, sticky="e")
         self.hf_repo_fp8 = tk.StringVar()
         tk.Entry(self.global_upload_frame, textvariable=self.hf_repo_fp8).grid(row=0, column=3, sticky="ew", padx=5)
-
         tk.Label(self.global_upload_frame, text="GGUF Folder:").grid(row=1, column=0, sticky="e")
         self.hf_dest_gguf = tk.StringVar()
         tk.Entry(self.global_upload_frame, textvariable=self.hf_dest_gguf).grid(row=1, column=1, sticky="ew", padx=5)
-
         tk.Label(self.global_upload_frame, text="FP8 Folder:").grid(row=1, column=2, sticky="e")
         self.hf_dest_fp8 = tk.StringVar()
         tk.Entry(self.global_upload_frame, textvariable=self.hf_dest_fp8).grid(row=1, column=3, sticky="ew", padx=5)
-        
         self.global_upload_frame.columnconfigure(1, weight=1)
         self.global_upload_frame.columnconfigure(3, weight=1)
-
-        # View B: Custom Upload Table (Empty holder)
         self.custom_upload_frame = tk.Frame(f_sets)
-
-        # Cleanup
+        
         self.footer_frame = tk.Frame(f_sets)
         self.footer_frame.grid(row=5, column=0, columnspan=5, sticky="ew", pady=5)
         ttk.Separator(self.footer_frame, orient="horizontal").pack(fill="x", pady=5)
@@ -434,6 +389,10 @@ class ConverterApp:
         tk.Radiobutton(f_c, text="After Each Model", variable=self.cleanup_mode, value="per_model").pack(side="left")
         tk.Radiobutton(f_c, text="After All Complete", variable=self.cleanup_mode, value="all_end").pack(side="left")
         
+        self.keep_dequant_var = tk.BooleanVar(value=False)
+        self.keep_convert_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(f_c, text="Keep Dequant Source", variable=self.keep_dequant_var, fg="orange").pack(side="left", padx=10)
+        tk.Checkbutton(f_c, text="Keep GGUF Source (CONVERT)", variable=self.keep_convert_var, fg="orange").pack(side="left")
         f_sets.columnconfigure(2, weight=1)
 
         # 6. Actions
@@ -446,7 +405,6 @@ class ConverterApp:
         self.btn_run = tk.Button(f_act, text="START PROCESSING", bg="#ddffdd", height=2, command=self.start_thread)
         self.btn_run.pack(side="right", fill="x", expand=True, padx=5)
 
-    # --- UI HELPERS ---
     def clear_logs(self):
         self.log_display.configure(state='normal')
         self.log_display.delete("1.0", tk.END)
@@ -456,7 +414,6 @@ class ConverterApp:
         out_mode = self.out_mode_var.get()
         if out_mode == "custom": self.global_out_frame.pack_forget()
         else: self.global_out_frame.pack(fill="x", padx=10, pady=5, before=self.f_files_container)
-
         if out_mode == "custom":
             self.simple_list_frame.pack_forget()
             self.build_local_table()
@@ -486,7 +443,6 @@ class ConverterApp:
             row = i + 1
             self._ensure_file_data(fpath)
             dat = self.custom_file_data[fpath]
-            # WIDER COLUMN FOR FILENAME
             tk.Label(self.local_custom_frame, text=os.path.basename(fpath), width=50, anchor="w").grid(row=row, column=0, sticky="w", padx=2)
             fr = tk.Frame(self.local_custom_frame)
             fr.grid(row=row, column=1, sticky="ew", padx=2)
@@ -502,7 +458,6 @@ class ConverterApp:
             row = i + 1
             self._ensure_file_data(fpath)
             dat = self.custom_file_data[fpath]
-            # WIDER COLUMN
             tk.Label(self.custom_upload_frame, text=os.path.basename(fpath), width=40, anchor="w").grid(row=row, column=0, sticky="w", padx=1)
             tk.Entry(self.custom_upload_frame, textvariable=dat["gguf_r"]).grid(row=row, column=1, sticky="ew", padx=1)
             tk.Entry(self.custom_upload_frame, textvariable=dat["gguf_d"]).grid(row=row, column=2, sticky="ew", padx=1)
@@ -556,7 +511,6 @@ class ConverterApp:
         self.progress_window.deiconify()
         self.progress_window.lift()
 
-    # --- THREADING & LOGIC ---
     def cancel_processing(self):
         if not self.is_running: return
         if messagebox.askyesno("Cancel", "Stop processing?"):
@@ -583,35 +537,20 @@ class ConverterApp:
         
         gen = [q for q, v in self.quant_vars_gen.items() if v.get()]
         up_only = [q for q, v in self.quant_vars_up.items() if v.get()]
-        
         if not gen and not up_only: return messagebox.showerror("Error", "Select at least one Generate or Upload option.")
         
         self.stop_requested = False
         steps = []
-        
-        # --- LOGICAL SORT ORDER FOR PROGRESS GRID ---
-        # Explicit sort order: Lowest Bitrate -> Highest Bitrate -> FP8
-        SORT_ORDER = [
-            "IQ2_XS", "IQ2_S", "Q2_K",
-            "IQ3_XXS", "IQ3_S", "IQ3_M", "Q3_K_S", "Q3_K_M", "Q3_K_L",
-            "IQ4_NL", "IQ4_XS", "Q4_0", "Q4_K_S", "Q4_K_M",
-            "Q5_0", "Q5_K_S", "Q5_K_M",
-            "Q6_K", "Q8_0",
-            "BF16", "F16",
-            "FP8_E4M3FN", "FP8_E4M3FN (All)",
-            "FP8_E5M2", "FP8_E5M2 (All)"
-        ]
+        SORT_ORDER = ["IQ2_XS", "IQ2_S", "Q2_K", "IQ3_XXS", "IQ3_S", "IQ3_M", "Q3_K_S", "Q3_K_M", "Q3_K_L",
+                      "IQ4_NL", "IQ4_XS", "Q4_0", "Q4_K_S", "Q4_K_M", "Q5_0", "Q5_K_S", "Q5_K_M", "Q6_K", "Q8_0",
+                      "BF16", "F16", "FP8_E4M3FN", "FP8_E4M3FN (All)", "FP8_E5M2", "FP8_E5M2 (All)"]
         
         active_quants = list(set(gen + up_only))
-        # Sort active_quants based on SORT_ORDER index, putting unknowns at end
         active_quants.sort(key=lambda x: SORT_ORDER.index(x) if x in SORT_ORDER else 999)
 
         fp8_variants = ["FP8_E5M2", "FP8_E5M2 (All)", "FP8_E4M3FN", "FP8_E4M3FN (All)"]
-        
-        # Add Prep step if we are GENERATING any GGUF
         gguf_gen_needed = [q for q in gen if q not in fp8_variants]
-        if gguf_gen_needed:
-            steps.append("GGUF Prep")
+        if gguf_gen_needed: steps.append("GGUF Prep")
         
         for q in active_quants: steps.append(q)
         if self.do_upload.get(): steps.append("Upload")
@@ -627,9 +566,17 @@ class ConverterApp:
 
     def run_main_logic(self, gen_list, up_list):
         try:
+            # Cleanup previous run tensor fix file
+            if os.path.exists("fix_5d_tensors_wan.safetensors"):
+                try:
+                    os.remove("fix_5d_tensors_wan.safetensors")
+                    logging.info("Startup Cleanup: Deleted old 'fix_5d_tensors_wan.safetensors'")
+                except: pass
+
             strategy = self.cleanup_mode.get()
             keep_list = [q for q, v in self.quant_vars_keep.items() if v.get()]
-            up_list = [q for q, v in self.quant_vars_up.items() if v.get()]
+            keep_dequant = self.keep_dequant_var.get()
+            keep_convert = self.keep_convert_var.get()
             out_mode = self.out_mode_var.get()
             up_mode = self.upload_mode_var.get()
             
@@ -644,7 +591,6 @@ class ConverterApp:
                 model_base = os.path.basename(f)
                 name = re.sub(r'-(f16|F16|BF16|CONVERT|UnFixed|FIXED)$', '', os.path.splitext(model_base)[0], flags=re.IGNORECASE)
                 
-                # Output Dir Logic
                 if out_mode == "custom":
                     dat = self.custom_file_data.get(f, {})
                     out_dir = dat["out"].get() if "out" in dat else os.path.dirname(f)
@@ -655,7 +601,7 @@ class ConverterApp:
                 os.makedirs(out_dir, exist_ok=True)
                 generated_files = []
 
-                # --- FP8 Logic ---
+                # FP8
                 fp8_targets = ["FP8_E5M2", "FP8_E5M2 (All)", "FP8_E4M3FN", "FP8_E4M3FN (All)"]
                 for q in fp8_targets:
                     if q in gen_list or q in up_list:
@@ -663,10 +609,9 @@ class ConverterApp:
                         self.msg_queue.put(("UPDATE_GRID", model_base, q, "RUNNING"))
                         
                         suffix = "_All" if "All" in q else ""
-                        base_q_name = q.split(" ")[0] # FP8_E5M2
+                        base_q_name = q.split(" ")[0]
                         expected_path = os.path.join(out_dir, f"{name}-{base_q_name}{suffix}.safetensors")
                         
-                        # Case 1: Generate
                         if q in gen_list:
                             try:
                                 if TORCH_AVAILABLE:
@@ -682,36 +627,30 @@ class ConverterApp:
                                 logging.error(f"FP8 Err: {e}")
                                 self.msg_queue.put(("UPDATE_GRID", model_base, q, "ERROR"))
                         
-                        # Case 2: Upload Only
                         elif q in up_list:
                             if os.path.exists(expected_path):
-                                logging.info(f"Found existing file for upload: {os.path.basename(expected_path)}")
                                 generated_files.append(expected_path)
                                 self.msg_queue.put(("UPDATE_GRID", model_base, q, "DONE"))
                             else:
-                                logging.warning(f"File not found for upload: {expected_path}")
                                 self.msg_queue.put(("UPDATE_GRID", model_base, q, "SKIP"))
 
-                # --- GGUF Logic ---
-                # Filter active GGUF quants (Gen or Up)
+                # GGUF
                 all_gguf_active = [q for q in (gen_list + up_list) if "FP8" not in q]
-                
                 if all_gguf_active:
-                    # Check if we need to generate source (only if generating at least one GGUF)
                     gguf_gen_needed = [q for q in gen_list if "FP8" not in q]
-                    
                     gguf_src = None
+                    
                     if gguf_gen_needed:
                         if self.stop_requested: break
                         self.msg_queue.put(("UPDATE_GRID", model_base, "GGUF Prep", "RUNNING"))
                         
-                        # Dequant/Convert Logic
                         if f.lower().endswith(".safetensors"):
                             curr = f
                             dq = os.path.join(out_dir, f"{name}-dequant.safetensors")
                             if os.path.exists("dequantize_fp8v2.py"):
                                 self.run_cmd([sys.executable, "dequantize_fp8v2.py", "--src", f, "--dst", dq, "--strip-fp8", "--dtype", "fp16"])
-                                if os.path.exists(dq): curr = dq; generated_files.append(dq)
+                                if os.path.exists(dq): 
+                                    curr = dq; generated_files.append(dq)
                             
                             conv = os.path.join(out_dir, f"{name}-CONVERT.gguf")
                             self.run_cmd([sys.executable, "convert.py", "--src", curr, "--dst", conv])
@@ -722,20 +661,16 @@ class ConverterApp:
                         if gguf_src: self.msg_queue.put(("UPDATE_GRID", model_base, "GGUF Prep", "DONE"))
                         else: self.msg_queue.put(("UPDATE_GRID", model_base, "GGUF Prep", "ERROR"))
                     
-                    # Process Quants
                     for q in all_gguf_active:
                         if self.stop_requested: break
                         self.msg_queue.put(("UPDATE_GRID", model_base, q, "RUNNING"))
-                        
                         expected_path = os.path.join(out_dir, f"{name}-{q}.gguf")
 
-                        # Case 1: Generate
                         if q in gen_list:
                             if not gguf_src: 
                                 self.msg_queue.put(("UPDATE_GRID", model_base, q, "SKIP"))
                                 continue
 
-                            # F16 Special Copy
                             if q in ["F16", "BF16"]:
                                 try:
                                     shutil.copy(gguf_src, expected_path)
@@ -755,31 +690,34 @@ class ConverterApp:
                                 
                                 try: os.rename(final, expected_path); generated_files.append(expected_path)
                                 except: generated_files.append(final)
+                                
+                                # Cleanup UnFixed if successful
+                                if os.path.exists(unfixed) and os.path.abspath(unfixed) != os.path.abspath(expected_path):
+                                    try: os.remove(unfixed)
+                                    except: pass
+
                                 self.msg_queue.put(("UPDATE_GRID", model_base, q, "DONE"))
                             else:
                                 self.msg_queue.put(("UPDATE_GRID", model_base, q, "ERROR"))
                         
-                        # Case 2: Upload Only
                         elif q in up_list:
                             if os.path.exists(expected_path):
-                                logging.info(f"Found existing file for upload: {os.path.basename(expected_path)}")
                                 generated_files.append(expected_path)
                                 self.msg_queue.put(("UPDATE_GRID", model_base, q, "DONE"))
                             else:
-                                logging.warning(f"File not found for upload: {expected_path}")
                                 self.msg_queue.put(("UPDATE_GRID", model_base, q, "SKIP"))
 
                 res_obj = { "name": name, "files": generated_files, "model_display": model_base, "src_path": f }
                 batch_results.append(res_obj)
 
                 if strategy == "per_model" and not self.stop_requested:
-                    self.handle_upload_cleanup(res_obj, keep_list, up_list, up_mode, out_mode)
+                    self.handle_upload_cleanup(res_obj, keep_list, up_list, up_mode, out_mode, keep_dequant, keep_convert)
 
             if strategy == "all_end" and not self.stop_requested:
                 logging.info("Batch Cleanup...")
                 for item in batch_results:
                     if self.stop_requested: break
-                    self.handle_upload_cleanup(item, keep_list, up_list, up_mode, out_mode)
+                    self.handle_upload_cleanup(item, keep_list, up_list, up_mode, out_mode, keep_dequant, keep_convert)
 
             if self.shutdown_var.get() and not self.stop_requested:
                 if platform.system() == "Windows": subprocess.run(["shutdown", "/s", "/t", "60"])
@@ -796,20 +734,14 @@ class ConverterApp:
 
     def _check_file_match_quant(self, fname, q):
         if "FP8" in q:
-            # q is "FP8_E5M2" or "FP8_E5M2 (All)"
-            # fname is "...-FP8_E5M2.safetensors" or "...-FP8_E5M2_All.safetensors"
-            base_q = q.split(" ")[0] # FP8_E5M2
+            base_q = q.split(" ")[0] 
             is_all_q = "(All)" in q
-            
-            if is_all_q:
-                return (base_q in fname and "_All" in fname)
-            else:
-                return (base_q in fname and "_All" not in fname)
-        
+            if is_all_q: return (base_q in fname and "_All" in fname)
+            else: return (base_q in fname and "_All" not in fname)
         if q in ["F16", "BF16"]: return f"-{q}.gguf" in fname
         return f"-{q}.gguf" in fname
 
-    def handle_upload_cleanup(self, item, keep_list, up_list, up_mode, out_mode):
+    def handle_upload_cleanup(self, item, keep_list, up_list, up_mode, out_mode, keep_dequant, keep_convert):
         if self.stop_requested: return
         name = item['name']
         files = item['files']
@@ -872,10 +804,15 @@ class ConverterApp:
             if not os.path.exists(p): continue
             fname = os.path.basename(p)
             should_keep = False
+            
             for q in keep_list:
                 if self._check_file_match_quant(fname, q):
                     should_keep = True
                     break
+            
+            if keep_dequant and "-dequant.safetensors" in fname: should_keep = True
+            if keep_convert and "-CONVERT.gguf" in fname: should_keep = True
+
             if not should_keep: 
                 try: os.remove(p); logging.info(f"Deleted {fname}")
                 except: pass
@@ -906,7 +843,9 @@ class ConverterApp:
             "shut": self.shutdown_var.get(),
             "q_gen": [k for k,v in self.quant_vars_gen.items() if v.get()],
             "q_up": [k for k,v in self.quant_vars_up.items() if v.get()],
-            "q_keep": [k for k,v in self.quant_vars_keep.items() if v.get()]
+            "q_keep": [k for k,v in self.quant_vars_keep.items() if v.get()],
+            "k_dequant": self.keep_dequant_var.get(),
+            "k_convert": self.keep_convert_var.get()
         }
         try: json.dump(d, open(f, 'w'), indent=4)
         except: pass
@@ -926,6 +865,8 @@ class ConverterApp:
             if "up_mode" in d: self.upload_mode_var.set(d["up_mode"])
             if "clean" in d: self.cleanup_mode.set(d["clean"])
             if "shut" in d: self.shutdown_var.set(d["shut"])
+            if "k_dequant" in d: self.keep_dequant_var.set(d["k_dequant"])
+            if "k_convert" in d: self.keep_convert_var.set(d["k_convert"])
             
             for v in self.quant_vars_gen.values(): v.set(False)
             for v in self.quant_vars_up.values(): v.set(False)
