@@ -201,6 +201,10 @@ class ConverterApp:
         self.root.title("GGUF & FP8 Manager v44")
         self.root.geometry("1600x950")
         
+        # --- SETTINGS FILE LOCATION (Absolute Path) ---
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        self.settings_file = os.path.join(script_dir, "last_run_settings.json")
+        
         self.msg_queue = queue.Queue()
         self.source_files = []
         self.custom_file_data = {} 
@@ -215,11 +219,16 @@ class ConverterApp:
         
         self.quant_cmd = self.get_quantize_command()
 
+        # --- BIND EXIT EVENT ---
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
         self._setup_ui()
         self._setup_logging()
         
         self.root.after(100, self.process_queue)
-        self.load_settings("last_run_settings.json", silent=True)
+        
+        # Load using absolute path
+        self.load_settings(self.settings_file, silent=True)
 
     def get_quantize_command(self):
         system = platform.system()
@@ -501,8 +510,12 @@ class ConverterApp:
     def restart(self):
         target = self.python_path_var.get()
         if not os.path.exists(target): return messagebox.showerror("Error", "Python not found")
-        self.save_settings("last_run_settings.json")
+        self.save_settings(self.settings_file)
         subprocess.Popen([target] + sys.argv)
+        self.root.destroy()
+
+    def on_close(self):
+        self.save_settings(self.settings_file)
         self.root.destroy()
 
     def show_progress_popup(self):
@@ -851,7 +864,8 @@ class ConverterApp:
             "k_convert": self.keep_convert_var.get()
         }
         try: json.dump(d, open(f, 'w'), indent=4)
-        except: pass
+        except Exception as e:
+            print(f"Error saving settings: {e}")
 
     def load_settings(self, f, silent=False):
         if not os.path.exists(f): return
