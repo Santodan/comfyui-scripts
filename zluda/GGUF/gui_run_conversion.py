@@ -198,7 +198,7 @@ class ProgressPopup(tk.Toplevel):
 class ConverterApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("GGUF & FP8 Manager v43")
+        self.root.title("GGUF & FP8 Manager v44")
         self.root.geometry("1600x950")
         
         self.msg_queue = queue.Queue()
@@ -769,6 +769,7 @@ class ConverterApp:
             
             files_to_upload = []
             for f in files:
+                # Intermediate exclusion logic for upload
                 if f.endswith("-CONVERT.gguf") or f.endswith("-UnFixed.gguf") or f.endswith("-dequant.safetensors"): continue
                 fname = os.path.basename(f)
                 should_upload = False
@@ -805,11 +806,13 @@ class ConverterApp:
             fname = os.path.basename(p)
             should_keep = False
             
+            # Keep logic
             for q in keep_list:
                 if self._check_file_match_quant(fname, q):
                     should_keep = True
                     break
             
+            # Extra checks for Intermediates
             if keep_dequant and "-dequant.safetensors" in fname: should_keep = True
             if keep_convert and "-CONVERT.gguf" in fname: should_keep = True
 
