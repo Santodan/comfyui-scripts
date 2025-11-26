@@ -1,329 +1,370 @@
-# run_conversion_v5.py
 import os
-import subprocess
 import sys
-import importlib
-import glob
-import platform
+import subprocess
 import logging
 import re
+import glob
+import shutil
 from datetime import datetime
 
+# --- CONFIGURATION ---
+# Sorted Logical Order (Low -> High Quality)
+QUANTIZATION_OPTIONS = [
+    "IQ2_XS", "IQ2_S", "Q2_K",
+    "IQ3_XXS", "IQ3_S", "IQ3_M", "Q3_K_S", "Q3_K_M", "Q3_K_L",
+    "IQ4_NL", "IQ4_XS", "Q4_0", "Q4_K_S", "Q4_K_M",
+    "Q5_0", "Q5_K_S", "Q5_K_M",
+    "Q6_K", "Q8_0",
+    "BF16", "F16",
+    "FP8_E4M3FN", "FP8_E4M3FN (All)",
+    "FP8_E5M2", "FP8_E5M2 (All)"
+]
+
+# --- SETUP LOGGING ---
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%H:%M:%S',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+
+# --- IMPORTS ---
 try:
     import upload_to_hf_v4 as uploader
+    # We need HfApi for the interactive selector
+    from huggingface_hub import HfApi, login, create_repo
+    UPLOADER_AVAILABLE = True
 except ImportError:
     uploader = None
+    UPLOADER_AVAILABLE = False
 
-def setup_logging():
-    log_dir = "logs"; os.makedirs(log_dir, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    log_filename = os.path.join(log_dir, f"conversion_log_{timestamp}.log")
-    logger = logging.getLogger(); logger.setLevel(logging.INFO)
-    file_handler = logging.FileHandler(log_filename, mode='w'); file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'); file_handler.setFormatter(file_formatter); logger.addHandler(file_handler)
-    console_handler = logging.StreamHandler(sys.stdout); console_formatter = logging.Formatter('%(message)s'); console_handler.setFormatter(console_formatter); logger.addHandler(console_handler)
-    return log_filename
-
-required_packages = ['gguf', 'torch', 'safetensors', 'tqdm', 'huggingface-hub', 'prompt-toolkit']
-
-from huggingface_hub import HfApi, login, whoami, create_repo
-from huggingface_hub.errors import HfHubHTTPError
 try:
-    from prompt_toolkit import PromptSession, prompt
-    from prompt_toolkit.completion import PathCompleter
-    prompt_toolkit_available = True
+    import torch
+    from safetensors.torch import save_file, load_file
+    TORCH_AVAILABLE = True
 except ImportError:
-    prompt_toolkit_available = False
+    TORCH_AVAILABLE = False
 
-QUANTIZATION_OPTIONS = sorted([
-    "F16", "BF16", "Q4_0", "Q4_K_S", "Q4_K_M", "Q5_0", "Q5_K_S", "Q5_K_M", "Q6_K", "Q8_0",
-    "IQ2_XS", "IQ2_S", "IQ3_XXS", "IQ3_S", "IQ3_M", "IQ4_NL", "IQ4_XS",
-    "Q2_K", "Q3_K_S", "Q3_K_M", "Q3_K_L"
-])
+# --- FP8 LOGIC ---
+if TORCH_AVAILABLE:
+    class FP8Quantizer:
+        def __init__(self, quant_dtype: str = "float8_e5m2"):
+            if not hasattr(torch, quant_dtype): raise ValueError(f"Unsupported: {quant_dtype}")
+            self.quant_dtype = quant_dtype
 
-def run_command(command, step_name=""):
-    """Executes a shell command, logs its output in real-time, and checks for errors."""
-    logging.info(f"\n{'='*20}\n[STEP] Running: {step_name}\n{' '.join(command)}\n{'='*20}")
-    try:
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace', bufsize=1, universal_newlines=True)
-        for line in iter(process.stdout.readline, ''): logging.info(line.strip())
-        process.stdout.close()
-        return_code = process.wait()
-        if return_code == 0: logging.info(f"\n[SUCCESS] Step '{step_name}' completed successfully."); return True
-        else: logging.error(f"\n[ERROR] Step '{step_name}' failed with return code {return_code}."); return False
-    except FileNotFoundError: logging.error(f"\n[ERROR] Command not found: '{command[0]}'."); return False
-    except Exception as e: logging.error(f"\n[ERROR] An unexpected error occurred in step '{step_name}': {e}"); return False
+        def quantize_weights(self, weight: torch.Tensor, name: str) -> torch.Tensor:
+            if not weight.is_floating_point(): return weight
+            
+            # Quality Guards (Skip sensitive layers)
+            if weight.ndim == 1: return weight.to(dtype=torch.float16)
+            for kw in ["norm", "time_emb", "proj_in", "proj_out", "guidance_in"]:
+                if kw in name: return weight.to(dtype=torch.float16)
 
-def get_user_input(prompt_text, validator, error_message):
-    """A generic function to get and validate user input."""
-    while True:
-        sys.stdout.write(prompt_text)
-        sys.stdout.flush()
-        user_input = sys.stdin.readline().strip()
-        if validator(user_input): return user_input
-        else: logging.warning(error_message)
+            target_device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+            weight_on_target = weight.to(target_device)
+            max_val = torch.max(torch.abs(weight_on_target))
+            
+            if max_val == 0:
+                target_torch_dtype = getattr(torch, self.quant_dtype)
+                return torch.zeros_like(weight_on_target, dtype=target_torch_dtype)
+            
+            divisor = 57344.0 if "e5m2" in self.quant_dtype else 448.0
+            scale = max_val / divisor
+            scale = torch.max(scale, torch.tensor(1e-12, device=target_device, dtype=weight_on_target.dtype))
+            
+            quantized = torch.round(weight_on_target / scale * 127.0) / 127.0 * scale
+            return quantized.to(dtype=getattr(torch, self.quant_dtype))
 
-def get_and_validate_input_files():
-    """Prompts the user for file paths and validates them until a valid input is given."""
-    prompt_text = "\nEnter path(s) to .safetensors or .gguf file(s) (wildcards OK):\n> "
-    if prompt_toolkit_available:
-        print("\nEnter path(s) to .safetensors or .gguf file(s) (use Tab, spaces, wildcards):")
-        session = PromptSession(completer=PathCompleter())
-        prompt_func, prompt_text = (lambda p: session.prompt(p)), "> "
-    else:
-        prompt_func = lambda p: input(p)
-    
-    while True:
-        user_input = prompt_func(prompt_text).strip()
-        if not user_input: continue
-        patterns, all_files, has_error = user_input.split(), [], False
-        for pattern in patterns:
-            matched_files = glob.glob(os.path.expanduser(pattern))
-            if not matched_files: logging.error(f"\n❌ No files found matching '{pattern}'."); has_error = True; break
-            all_files.extend(matched_files)
-        if has_error: continue
-        final_valid_files = []
-        for file_path in sorted(list(set(all_files))):
-            if not os.path.isfile(file_path): logging.error(f"\n❌ Path is not a file: '{file_path}'"); has_error = True; break
-            if not file_path.lower().endswith(('.safetensors', '.gguf')): 
-                logging.error(f"\n❌ File must be .safetensors or .gguf: '{file_path}'"); has_error = True; break
-            final_valid_files.append(file_path)
-        if has_error: continue
-        return final_valid_files
-
-def process_single_model(source_file, output_dir, selected_quant_types, files_to_keep):
-    """Runs the full conversion and quantization process for a single model file."""
-    logging.info(f"\n{'#'*80}\n### Starting Process for: {os.path.basename(source_file)}\n{'#'*80}")
-    all_created_files, final_model_files = [], []
-    
-    if source_file.lower().endswith('.safetensors'):
-        base_name = os.path.splitext(os.path.basename(source_file))[0]
-        current_input_file = source_file
-        dequant_script_path = "dequantize_fp8v2.py"
-        if os.path.exists(dequant_script_path):
-            dequantized_file = os.path.join(output_dir, f"{base_name}-dequantized.safetensors")
-            cmd = [sys.executable, dequant_script_path, "--src", source_file, "--dst", dequantized_file, "--strip-fp8", "--dtype", "fp16"]
-            if run_command(cmd, "Dequantize FP8") and os.path.exists(dequantized_file):
-                current_input_file, all_created_files = dequantized_file, all_created_files + [dequantized_file]
-            else: logging.warning("[WARNING] Dequantize script failed.")
-        quantization_source_file = os.path.join(output_dir, f"{base_name}-CONVERT.gguf")
-        if not run_command([sys.executable, "convert.py", "--src", current_input_file, "--dst", quantization_source_file], "Convert to GGUF"):
-            logging.error(f"\n[FATAL] Conversion for {source_file} failed."); return []
-        all_created_files.append(quantization_source_file)
-    elif source_file.lower().endswith('.gguf'):
-        logging.info("GGUF file detected. Skipping dequantize and convert steps.")
-        quantization_source_file = source_file
-        raw_basename = os.path.splitext(os.path.basename(source_file))[0]
-        base_name = re.sub(r'-(f16|F16|CONVERT)$', '', raw_basename, flags=re.IGNORECASE)
-    else:
-        logging.error(f"Unsupported file type for: {source_file}"); return []
-
-    if 'F16' in selected_quant_types or 'BF16' in selected_quant_types:
-        final_model_files.append(quantization_source_file)
-    actual_quant_types = [q for q in selected_quant_types if q not in ["F16", "BF16"]]
-    fix_tensor_file = None
-    possible_fix_files = glob.glob("fix_5d_tensors_*.safetensors")
-    if possible_fix_files:
-        fix_tensor_file = os.path.join(output_dir, os.path.basename(possible_fix_files[0]))
-        if os.path.exists(fix_tensor_file): os.remove(fix_tensor_file)
-        os.rename(possible_fix_files[0], fix_tensor_file)
-        all_created_files.append(fix_tensor_file)
-
-    for quant_type in actual_quant_types:
-        unfixed = os.path.join(output_dir, f"{base_name}-{quant_type}-UnFixed.gguf")
-        if not run_command(["llama-quantize.exe", quantization_source_file, unfixed, quant_type], f"Quantize to {quant_type}"): continue
-        all_created_files.append(unfixed)
-        loop_output = unfixed
-        if fix_tensor_file:
-            fixed = os.path.join(output_dir, f"{base_name}-{quant_type}-FIXED.gguf")
-            cmd = [sys.executable, "fix_5d_tensors.py", "--src", unfixed, "--dst", fixed, "--fix", fix_tensor_file, "--overwrite"]
-            if run_command(cmd, f"Apply 5D Tensor Fix for {quant_type}"):
-                loop_output, all_created_files = fixed, all_created_files + [fixed]
-        final_model_files.append(loop_output)
-    
-    logging.info("\nDetermining which files to clean up...")
-    files_to_delete = set()
-    dequantized_path = os.path.join(output_dir, f"{base_name}-dequantized.safetensors")
-    if dequantized_path in all_created_files: files_to_delete.add(dequantized_path)
-    is_f16_kept = 'F16' in selected_quant_types or 'BF16' in selected_quant_types
-    if 'converted' not in files_to_keep and not is_f16_kept and quantization_source_file.endswith("-CONVERT.gguf"):
-        files_to_delete.add(quantization_source_file)
-    if fix_tensor_file and 'fix_tensor' not in files_to_keep: files_to_delete.add(fix_tensor_file)
-    for f in final_model_files:
-        if f.endswith("-FIXED.gguf") and 'unfixed' not in files_to_keep:
-            unfixed_sibling = f.replace("-FIXED.gguf", "-UnFixed.gguf")
-            if unfixed_sibling in all_created_files: files_to_delete.add(unfixed_sibling)
-    if files_to_delete:
-        logging.info("Cleaning up intermediate files...")
-        for f in sorted(list(files_to_delete)):
-            if os.path.exists(f):
-                try: os.remove(f); logging.info(f"  - Deleted {f}")
-                except OSError as e: logging.error(f"  - Error deleting {f}: {e}")
-
-    logging.info("\nRenaming final model files...")
-    renamed_final_files, final_products = [], set(final_model_files) - files_to_delete
-    for old_path in final_products:
-        new_path, filename = old_path, os.path.basename(old_path)
-        clean_path = old_path
-        if filename.endswith(("-CONVERT.gguf", "-F16.gguf")):
-            clean_path = os.path.join(output_dir, f"{base_name}-F16.gguf")
-        elif filename.endswith("-FIXED.gguf") or filename.endswith("-UnFixed.gguf"):
-            sibling = old_path.replace("-FIXED.gguf", "-UnFixed.gguf") if filename.endswith("-FIXED.gguf") else old_path.replace("-UnFixed.gguf", "-FIXED.gguf")
-            if sibling not in final_products:
-                quant_name = filename.split('-')[-2]
-                clean_path = os.path.join(output_dir, f"{base_name}-{quant_name}.gguf")
-            else: logging.info(f"  - Keeping original name for '{filename}' to avoid conflict.")
-        if clean_path != old_path:
+        def convert_file(self, src, dst, unet_only=True):
+            logging.info(f"FP8 Conversion ({self.quant_dtype}) -> {os.path.basename(dst)}")
             try:
-                if os.path.exists(clean_path): logging.warning(f"  - ⚠️  Warning: Target file '{os.path.basename(clean_path)}' already exists.")
-                else: os.rename(old_path, clean_path); new_path = clean_path; logging.info(f"  - Renamed '{filename}' to '{os.path.basename(clean_path)}'")
-            except OSError as e: logging.error(f"  - ❌ Error renaming file: {e}")
-        renamed_final_files.append(new_path)
-    
-    logging.info(f"\n### Finished processing for: {os.path.basename(source_file)} ###")
-    return renamed_final_files
+                if src.endswith(".safetensors"): state_dict = load_file(src)
+                else: state_dict = torch.load(src, map_location="cpu")
+                
+                new_dict = {}
+                total = len(state_dict)
+                for i, (name, param) in enumerate(state_dict.items()):
+                    if unet_only and "model.diffusion_model" not in name: continue
+                    if i % 200 == 0: print(f"  Processing tensor {i}/{total}...", end="\r")
+                    
+                    if isinstance(param, torch.Tensor) and param.is_floating_point():
+                        new_dict[name] = self.quantize_weights(param, name)
+                    else:
+                        new_dict[name] = param
+                print("")
+                save_file(new_dict, dst)
+                del state_dict; del new_dict
+                if torch.cuda.is_available(): torch.cuda.empty_cache()
+                return True
+            except Exception as e:
+                logging.error(f"FP8 Error: {e}")
+                return False
+else:
+    class FP8Quantizer:
+        def __init__(self, *args, **kwargs): pass
 
-def clean_model_name(filename):
-    """Extracts a clean model name from a filename to use as a folder name."""
-    base = os.path.splitext(os.path.basename(filename))[0]
-    # Remove common suffixes to get the 'root' model name
-    base = re.sub(r'-(f16|F16|BF16|CONVERT|UnFixed|FIXED)$', '', base, flags=re.IGNORECASE)
-    return base.strip()
+# --- HELPER FUNCTIONS ---
+def get_input(prompt_text, default=None):
+    if default:
+        user_in = input(f"{prompt_text} [{default}]: ").strip()
+        return user_in if user_in else default
+    return input(f"{prompt_text}: ").strip()
 
-def main():
-    """Main function to orchestrate the conversion process for multiple files."""
-    log_file = setup_logging()
-    logging.info(f"--- Model Conversion/Quantization Script ---")
-    logging.info(f"Log file: {os.path.abspath(log_file)}")
-    
-    missing = []
-    for package in required_packages:
-        try: importlib.import_module(package.replace('-', '_'))
-        except ImportError: missing.append(package)
-    if missing: logging.error(f"Required libraries not installed: {', '.join(missing)}"); sys.exit(1)
-    logging.info("All required libraries are installed.")
-
+def run_cmd(cmd):
+    logging.info(f"CMD: {' '.join(cmd)}")
     try:
-        source_files = get_and_validate_input_files()
-        logging.info(f"Source files: {source_files}")
-        if not source_files: logging.error("No valid input files. Exiting."); return
-        logging.info("Models to process:" + "".join([f"\n  - {f}" for f in source_files]))
-        
-        output_dir_base_str = prompt("\nEnter BASE output directory (blank for source dir): ", completer=PathCompleter(only_directories=True)).strip() if prompt_toolkit_available else input("\nEnter BASE output directory (blank for source dir): ").strip()
-        
-        print("\nOutput Organization:")
-        print("  1. Create separate folder per model (e.g. BaseDir/ModelName/...)")
-        print("  2. Save all files in one folder (e.g. BaseDir/...)")
-        org_choice = get_user_input("Select organization (1 or 2): ", lambda s: s in ['1', '2'], "Please enter 1 or 2.")
-        group_by_model = (org_choice == '1')
+        subprocess.run(cmd, check=True)
+        return True
+    except subprocess.CalledProcessError:
+        logging.error("Command Failed.")
+        return False
 
-        logging.info(f"Base Directory: '{output_dir_base_str}' | Group by model: {group_by_model}")
-
-        logging.info("\nAvailable quants:" + "".join([f"\n  {i+1:2}. {q}" for i, q in enumerate(QUANTIZATION_OPTIONS)]))
-        indices = get_user_input("Select quants (e.g., '9 18 20'): ", lambda s: all(c in '0123456789, ' for c in s.replace(",", " ")), "Invalid selection.")
-        selected_quant_types = [QUANTIZATION_OPTIONS[int(i) - 1] for i in indices.replace(',', ' ').split()]
-        logging.info(f"Quants selected: {selected_quant_types}")
+def interactive_repo_select(api, token, label="GGUF"):
+    """ Fetches user repos and allows selection via number """
+    try:
+        user_info = api.whoami(token=token)
+        username = user_info['name']
+        print(f"\n--- Fetching repositories for user: {username} ---")
         
-        file_options = {'1': "converted", '2': "unfixed", '3': "fixed", '4': "fix_tensor"}
-        logging.info("\nKeep intermediate files?" + "\n  1. ...-CONVERT.gguf" + "\n  2. ...-UnFixed.gguf" + "\n  3. ...-FIXED.gguf" + "\n  4. ...fix_tensor.safetensors" + "\n  5. All")
-        keep_indices = get_user_input("Enter numbers to keep (e.g., '1 4'): ", lambda s: all(c in '12345, ' for c in s.replace(",", " ")), "Invalid selection.").split()
-        files_to_keep = set(file_options.values()) if '5' in keep_indices else {file_options[k] for k in keep_indices}
+        # List models (filter by owner)
+        models = list(api.list_models(author=username, limit=100))
+        # Sort alphabetically
+        models.sort(key=lambda x: x.modelId)
         
-        upload_enabled, hf_repo, hf_root_dest_folder, hf_token = False, "", "", None
-        if uploader and input("\nUpload to Hugging Face Hub? (y/n): ").lower().strip() == 'y':
-            logging.info("User chose to upload.")
-            try:
-                hf_token = os.getenv("HUGGING_FACE_HUB_TOKEN")
-                if hf_token: logging.info("Found HF_TOKEN.")
-                login(token=hf_token, add_to_git_credential=False)
-                username = whoami(token=hf_token)['name']; logging.info(f"Logged in as: {username}"); api = HfApi(token=hf_token)
-                while not hf_repo:
-                    logging.info("\nFetching repos..."); repos = sorted([r.id for r in api.list_models(author=username, token=hf_token)])
-                    if repos: print("Select a repo:", *[f"\n  {i+1}. {r}" for i, r in enumerate(repos)])
-                    print("\n  N. Create new repo")
-                    choice = input("Enter number, 'N' to create, or 'Q' to quit upload: ").strip().upper()
-                    if choice == 'Q': break
-                    elif choice == 'N':
-                        new_repo = input("Enter new repo name: ").strip()
-                        if not new_repo: logging.warning("Repo name cannot be empty."); continue
-                        if '/' not in new_repo: new_repo = f"{username}/{new_repo}"
-                        is_private = input("Make private? [y/n]: ").strip().lower() == 'y'
-                        try: hf_repo = create_repo(repo_id=new_repo, private=is_private, repo_type='model', token=hf_token).repo_id; logging.info(f"Created '{hf_repo}'")
-                        except HfHubHTTPError as e: logging.error(f"Error creating repo: {e}")
-                    else:
-                        try: hf_repo = repos[int(choice) - 1]
-                        except (ValueError, IndexError): logging.warning("Invalid selection.")
-                if hf_repo: 
-                    upload_enabled = True; logging.info(f"Repo selected: {hf_repo}")
-                    hf_root_dest_folder = input(f"\nEnter destination root folder in '{hf_repo}' (blank for root): ").strip()
-                    logging.info(f"Destination root: '{hf_root_dest_folder or 'Repo Root'}'")
-            except Exception as e: logging.error(f"HF login/selection failed: {e}\nSkipping upload.")
+        print(f"Select Target Repo for {label}:")
+        for i, model in enumerate(models):
+            print(f"  [{i+1}] {model.modelId}")
         
-        shutdown_when_done = input("\nShutdown when complete? (y/n): ").lower().strip() in ['y', 'yes']
-
-        processed_batches = [] 
-
-        for f in source_files:
-            model_name = clean_model_name(f)
-            base_dir = output_dir_base_str if output_dir_base_str else os.path.dirname(f)
+        print("  [N] Create New Repository")
+        print("  [M] Manual Entry (Type ID manually)")
+        print("  [S] Skip this upload type")
+        
+        while True:
+            choice = input(f"Select option for {label}: ").strip().upper()
+            if choice == 'S': return None
             
-            # Decision: Subfolder or Flat?
-            if group_by_model:
-                specific_out_dir = os.path.join(base_dir, model_name)
-            else:
-                specific_out_dir = base_dir
+            if choice == 'M':
+                return input(f"Enter manual Repo ID for {label}: ").strip()
             
-            os.makedirs(specific_out_dir, exist_ok=True)
-            
-            generated_files = process_single_model(f, specific_out_dir, selected_quant_types, files_to_keep)
-            
-            processed_batches.append({
-                "name": model_name,
-                "directory": specific_out_dir,
-                "files": generated_files
-            })
-        
-        logging.info("\n--- All models processed. ---")
-        
-        if upload_enabled and processed_batches:
-            logging.info("\nStarting structured Hugging Face Upload...")
-            for batch in processed_batches:
-                if not batch["files"]: continue
-                
-                # Determine destination folder in HF
-                if group_by_model:
-                    # Upload to: RootDest/ModelName
-                    if hf_root_dest_folder:
-                        dest_subfolder = f"{hf_root_dest_folder}/{batch['name']}"
-                    else:
-                        dest_subfolder = batch["name"]
-                else:
-                    # Upload to: RootDest/ (All combined)
-                    dest_subfolder = hf_root_dest_folder
-                
-                # Clean up double slashes just in case
-                if dest_subfolder: dest_subfolder = dest_subfolder.replace("//", "/")
-                
-                logging.info(f"\n[UPLOAD] Uploading '{batch['name']}' to: {dest_subfolder if dest_subfolder else 'Repo Root'}")
+            if choice == 'N':
+                new_name = input("Enter new repo name: ").strip()
+                is_private = get_input("Private repo? (y/n)", default="y").lower() == "y"
+                full_id = f"{username}/{new_name}"
                 try:
-                    uploader.main(token=hf_token, repo_id=hf_repo, local_paths_args=batch["files"], dest_folder=dest_subfolder, non_interactive=True)
-                    logging.info(f"[SUCCESS] Upload for {batch['name']} complete.")
-                except Exception as e: 
-                    logging.error(f"[ERROR] Upload failed for {batch['name']}: {e}")
-        
-        if shutdown_when_done:
-            logging.info("\nInitiating shutdown...")
-            try:
-                if platform.system() == "Windows": subprocess.run(["shutdown", "/s", "/t", "60"], check=True)
-                else: subprocess.run(["sudo", "shutdown", "-h", "+1"], check=True)
-            except Exception as e: logging.error(f"❌ Failed to initiate shutdown: {e}")
-        else: logging.info("\nAll done!")
+                    create_repo(repo_id=full_id, private=is_private, token=token, exist_ok=True)
+                    print(f"Created {full_id}")
+                    return full_id
+                except Exception as e:
+                    print(f"Error creating repo: {e}")
+                    continue
 
-    except KeyboardInterrupt:
-        logging.warning("\n\nScript interrupted by user. Exiting.")
-        sys.exit(1)
+            if choice.isdigit():
+                idx = int(choice) - 1
+                if 0 <= idx < len(models):
+                    return models[idx].modelId
+            
+            print("Invalid selection.")
+
     except Exception as e:
-        logging.exception("An unexpected top-level error occurred:")
-        sys.exit(1)
+        print(f"Error fetching repos: {e}")
+        return input(f"Enter Repo ID manually for {label}: ").strip()
+
+# --- MAIN WIZARD ---
+def main():
+    print("\n=== GGUF & FP8 CONVERTER (CLI v7) ===")
+    
+    # 1. Files
+    print("\n--- 1. Input Files ---")
+    files_str = get_input("Enter file paths (separated by space)")
+    input_files = []
+    for pattern in files_str.split():
+        input_files.extend(glob.glob(pattern))
+    
+    if not input_files:
+        print("No files found. Exiting.")
+        return
+    
+    print(f"Found {len(input_files)} files.")
+
+    # 2. Output
+    print("\n--- 2. Output Configuration ---")
+    out_root = get_input("Base Output Directory", default="./output")
+    use_subfolder = get_input("Create subfolder per model? (y/n)", default="y").lower() == "y"
+
+    # 3. Quants
+    print("\n--- 3. Quantization Selection ---")
+    for i, q in enumerate(QUANTIZATION_OPTIONS):
+        print(f"{i+1:2d}. {q}")
+    
+    q_indices = get_input("Enter numbers to generate (e.g. 1 5 24)")
+    selected_quants = []
+    for idx in q_indices.split():
+        if idx.isdigit():
+            i = int(idx) - 1
+            if 0 <= i < len(QUANTIZATION_OPTIONS):
+                selected_quants.append(QUANTIZATION_OPTIONS[i])
+    
+    print(f"Selected: {selected_quants}")
+
+    # 4. Upload
+    do_upload = False
+    repo_gguf = ""
+    repo_fp8 = ""
+    dest_folder_gguf = ""
+    dest_folder_fp8 = ""
+    token = os.getenv("HUGGING_FACE_HUB_TOKEN", "")
+
+    if UPLOADER_AVAILABLE:
+        print("\n--- 4. Upload Configuration ---")
+        if get_input("Upload to Hugging Face? (y/n)", default="n").lower() == "y":
+            do_upload = True
+            if not token:
+                token = get_input("Enter HF Token")
+            
+            # Login to get API access
+            login(token=token, add_to_git_credential=False)
+            api = HfApi(token=token)
+
+            # Interactive Selection for GGUF
+            if any("FP8" not in q for q in selected_quants):
+                repo_gguf = interactive_repo_select(api, token, "GGUF")
+                if repo_gguf:
+                    dest_folder_gguf = get_input(f"Folder inside '{repo_gguf}' [Enter for root]")
+
+            # Interactive Selection for FP8
+            if any("FP8" in q for q in selected_quants):
+                repo_fp8 = interactive_repo_select(api, token, "FP8")
+                if repo_fp8:
+                    dest_folder_fp8 = get_input(f"Folder inside '{repo_fp8}' [Enter for root]")
+
+    # 5. Cleanup Strategy
+    print("\n--- 5. Cleanup Strategy ---")
+    cleanup_mode = get_input("Cleanup after each model? (y/n) [Saves disk space]", default="y").lower() == "y"
+    
+    keep_dequant = get_input("Keep intermediate Dequant file? (y/n)", default="n").lower() == "y"
+    keep_convert = get_input("Keep intermediate GGUF Source (CONVERT)? (y/n)", default="n").lower() == "y"
+
+    # --- START PROCESSING ---
+    quant_cmd = "./llama-quantize" if os.path.exists("./llama-quantize") else "llama-quantize"
+    
+    for fpath in input_files:
+        model_base = os.path.basename(fpath)
+        name = re.sub(r'-(f16|F16|BF16|CONVERT|UnFixed|FIXED)$', '', os.path.splitext(model_base)[0], flags=re.IGNORECASE)
+        
+        out_dir = os.path.join(out_root, name) if use_subfolder else out_root
+        os.makedirs(out_dir, exist_ok=True)
+
+        logging.info(f"\n>>> PROCESSING MODEL: {name}")
+        generated_files = []
+
+        # --- FP8 ---
+        fp8_quants = [q for q in selected_quants if "FP8" in q]
+        for q in fp8_quants:
+            is_e5m2 = "E5M2" in q
+            is_all = "(All)" in q
+            dtype = "float8_e5m2" if is_e5m2 else "float8_e4m3fn"
+            suffix = "_All" if is_all else ""
+            
+            dst = os.path.join(out_dir, f"{name}-{q.split(' ')[0]}{suffix}.safetensors")
+            
+            if TORCH_AVAILABLE:
+                qzer = FP8Quantizer(dtype)
+                if qzer.convert_file(fpath, dst, unet_only=(not is_all)):
+                    generated_files.append(dst)
+            else:
+                logging.error("Torch missing. Skipping FP8.")
+
+        # --- GGUF ---
+        gguf_quants = [q for q in selected_quants if "FP8" not in q]
+        if gguf_quants:
+            gguf_src = None
+            dq = None
+
+            # Convert to GGUF Source
+            if fpath.endswith(".safetensors"):
+                curr = fpath
+                dq = os.path.join(out_dir, f"{name}-dequant.safetensors")
+                
+                if os.path.exists("dequantize_fp8v2.py"):
+                    logging.info("Dequantizing (FP8 check)...")
+                    subprocess.run([sys.executable, "dequantize_fp8v2.py", "--src", fpath, "--dst", dq, "--strip-fp8", "--dtype", "fp16"])
+                    if os.path.exists(dq): curr = dq
+                
+                conv = os.path.join(out_dir, f"{name}-CONVERT.gguf")
+                if not os.path.exists(conv):
+                    logging.info("Converting to GGUF F16...")
+                    subprocess.run([sys.executable, "convert.py", "--src", curr, "--dst", conv])
+                
+                if os.path.exists(conv): gguf_src = conv
+            
+            elif fpath.endswith(".gguf"):
+                gguf_src = fpath
+
+            # Run Quants
+            if gguf_src:
+                for q in gguf_quants:
+                    final_path = os.path.join(out_dir, f"{name}-{q}.gguf")
+                    
+                    if q in ["F16", "BF16"]:
+                        shutil.copy(gguf_src, final_path)
+                        generated_files.append(final_path)
+                        continue
+
+                    unfixed = os.path.join(out_dir, f"{name}-{q}-UnFixed.gguf")
+                    logging.info(f"Quantizing {q}...")
+                    subprocess.run([quant_cmd, gguf_src, unfixed, q])
+                    
+                    if os.path.exists(unfixed):
+                        # Fix Tensors
+                        fixes = glob.glob("fix_5d_tensors_*.safetensors")
+                        if fixes:
+                            logging.info("Applying Tensor Fix...")
+                            fixed = os.path.join(out_dir, f"{name}-{q}-FIXED.gguf")
+                            subprocess.run([sys.executable, "fix_5d_tensors.py", "--src", unfixed, "--dst", fixed, "--fix", fixes[0], "--overwrite"])
+                            if os.path.exists(fixed):
+                                os.rename(fixed, final_path)
+                                os.remove(unfixed)
+                            else:
+                                os.rename(unfixed, final_path)
+                        else:
+                            os.rename(unfixed, final_path)
+                        
+                        if os.path.exists(final_path): generated_files.append(final_path)
+            
+            # Cleanup Intermediates
+            if gguf_src and "CONVERT" in gguf_src and not keep_convert:
+                if os.path.exists(gguf_src): os.remove(gguf_src)
+            if dq and os.path.exists(dq) and not keep_dequant:
+                os.remove(dq)
+
+        # --- UPLOAD ---
+        if do_upload:
+            fp8s = [f for f in generated_files if "FP8" in f]
+            ggufs = [f for f in generated_files if "FP8" not in f]
+            
+            # Dest folder per model (append name)
+            d_f = f"{dest_folder_fp8}/{name}" if dest_folder_fp8 else name
+            d_g = f"{dest_folder_gguf}/{name}" if dest_folder_gguf else name
+
+            # If dest folder was explicitly root "/", we don't append name
+            if dest_folder_fp8 == "/": d_f = ""
+            if dest_folder_gguf == "/": d_g = ""
+
+            if fp8s and repo_fp8:
+                logging.info(f"Uploading FP8 to {repo_fp8} -> {d_f}")
+                uploader.main(repo_id=repo_fp8, local_paths_args=fp8s, dest_folder=d_f)
+            
+            if ggufs and repo_gguf:
+                logging.info(f"Uploading GGUF to {repo_gguf} -> {d_g}")
+                uploader.main(token=token, repo_id=repo_gguf, local_paths_args=ggufs, dest_folder=d_g)
+
+        # --- CLEANUP ---
+        if cleanup_mode:
+            logging.info("Cleaning up local generated files...")
+            for f in generated_files:
+                if os.path.exists(f): os.remove(f)
+
+    print("\n--- All Tasks Complete ---")
 
 if __name__ == "__main__":
     main()
