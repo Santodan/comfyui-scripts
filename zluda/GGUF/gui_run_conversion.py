@@ -198,7 +198,7 @@ class ProgressPopup(tk.Toplevel):
 class ConverterApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("GGUF & FP8 Manager v44")
+        self.root.title("GGUF & FP8 Manager")
         self.root.geometry("1600x950")
         
         # --- SETTINGS FILE LOCATION (Absolute Path) ---
@@ -904,3 +904,4 @@ if __name__ == "__main__":
     root = tk.Tk()
     app = ConverterApp(root)
     root.mainloop()
+
