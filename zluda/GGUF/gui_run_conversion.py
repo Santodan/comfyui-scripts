@@ -318,6 +318,11 @@ class ConverterApp:
         btn_box = tk.Frame(self.f_files_container)
         btn_box.pack(fill="x", pady=2)
         tk.Button(btn_box, text="Add Files...", command=self.add_files, bg="#e6f2ff").pack(side="left", fill="x", expand=True)
+        
+        # --- NEW BUTTON HERE ---
+        tk.Button(btn_box, text="Remove Selected", command=self.remove_selected_files, bg="#fff0f0").pack(side="left", padx=5)
+        # -----------------------
+
         tk.Button(btn_box, text="Clear List", command=self.clear_files).pack(side="left", padx=5)
         self.simple_list_frame = tk.Frame(self.f_files_container)
         self.file_listbox = tk.Listbox(self.simple_list_frame, height=6, selectmode=tk.EXTENDED)
@@ -445,33 +450,61 @@ class ConverterApp:
 
     def build_local_table(self):
         for w in self.local_custom_frame.winfo_children(): w.destroy()
-        headers = ["File Name", "Output Path"]
-        for c, h in enumerate(headers): tk.Label(self.local_custom_frame, text=h, font="Arial 8 bold", bg="#ddd").grid(row=0, column=c, sticky="ew", padx=1)
+        
+        # Added "Remove" to headers
+        headers = ["File Name", "Output Path", "Remove"]
+        for c, h in enumerate(headers): 
+            tk.Label(self.local_custom_frame, text=h, font="Arial 8 bold", bg="#ddd").grid(row=0, column=c, sticky="ew", padx=1)
+        
         self.local_custom_frame.columnconfigure(1, weight=1)
+        
         for i, fpath in enumerate(self.source_files):
             row = i + 1
             self._ensure_file_data(fpath)
             dat = self.custom_file_data[fpath]
+            
+            # File Name
             tk.Label(self.local_custom_frame, text=os.path.basename(fpath), width=50, anchor="w").grid(row=row, column=0, sticky="w", padx=2)
+            
+            # Path Entry + Browse Button
             fr = tk.Frame(self.local_custom_frame)
             fr.grid(row=row, column=1, sticky="ew", padx=2)
             tk.Entry(fr, textvariable=dat["out"]).pack(side="left", fill="x", expand=True)
-            tk.Button(fr, text="..", width=1, command=lambda d=dat: self.browse_file_out(d)).pack(side="right")
+            tk.Button(fr, text="..", width=3, command=lambda d=dat: self.browse_file_out(d)).pack(side="right")
+            
+            # NEW: Remove Button (Red X)
+            # We use lambda f=fpath: to capture the specific file for this row
+            btn_rem = tk.Button(self.local_custom_frame, text="X", bg="#ffcccc", fg="red", font="Arial 8 bold",
+                                command=lambda f=fpath: self.remove_single_file(f))
+            btn_rem.grid(row=row, column=2, padx=2, pady=1)
 
     def build_upload_table(self):
         for w in self.custom_upload_frame.winfo_children(): w.destroy()
-        headers = ["File", "GGUF Repo", "GGUF Folder", "FP8 Repo", "FP8 Folder"]
-        for c, h in enumerate(headers): tk.Label(self.custom_upload_frame, text=h, font="Arial 8 bold", bg="#ddd").grid(row=0, column=c, sticky="ew", padx=1)
+        
+        # Added "Remove" to headers
+        headers = ["File", "GGUF Repo", "GGUF Folder", "FP8 Repo", "FP8 Folder", "Remove"]
+        for c, h in enumerate(headers): 
+            tk.Label(self.custom_upload_frame, text=h, font="Arial 8 bold", bg="#ddd").grid(row=0, column=c, sticky="ew", padx=1)
+        
+        # Configure column weights
         for c in range(5): self.custom_upload_frame.columnconfigure(c, weight=1)
+        
         for i, fpath in enumerate(self.source_files):
             row = i + 1
             self._ensure_file_data(fpath)
             dat = self.custom_file_data[fpath]
-            tk.Label(self.custom_upload_frame, text=os.path.basename(fpath), width=40, anchor="w").grid(row=row, column=0, sticky="w", padx=1)
+            
+            # Fields
+            tk.Label(self.custom_upload_frame, text=os.path.basename(fpath), width=30, anchor="w").grid(row=row, column=0, sticky="w", padx=1)
             tk.Entry(self.custom_upload_frame, textvariable=dat["gguf_r"]).grid(row=row, column=1, sticky="ew", padx=1)
             tk.Entry(self.custom_upload_frame, textvariable=dat["gguf_d"]).grid(row=row, column=2, sticky="ew", padx=1)
             tk.Entry(self.custom_upload_frame, textvariable=dat["fp8_r"]).grid(row=row, column=3, sticky="ew", padx=1)
             tk.Entry(self.custom_upload_frame, textvariable=dat["fp8_d"]).grid(row=row, column=4, sticky="ew", padx=1)
+            
+            # NEW: Remove Button (Red X)
+            btn_rem = tk.Button(self.custom_upload_frame, text="X", bg="#ffcccc", fg="red", font="Arial 8 bold",
+                                command=lambda f=fpath: self.remove_single_file(f))
+            btn_rem.grid(row=row, column=5, padx=2, pady=1)
 
     def _ensure_file_data(self, fpath):
         if fpath not in self.custom_file_data:
@@ -495,6 +528,35 @@ class ConverterApp:
                 self.source_files.append(norm)
         self.refresh_file_list_ui()
         if self.upload_mode_var.get() == "custom": self.refresh_upload_ui()
+
+    def remove_single_file(self, fpath):
+        if fpath in self.source_files:
+            self.source_files.remove(fpath)
+            
+        # Clean up data dictionary (optional but good for memory)
+        if fpath in self.custom_file_data:
+            del self.custom_file_data[fpath]
+            
+        # Refresh both views so the file disappears everywhere
+        self.refresh_file_list_ui()
+        if self.upload_mode_var.get() == "custom":
+            self.refresh_upload_ui()
+
+    def remove_selected_files(self):
+        # Get selected indices from listbox (returns a tuple of integers)
+        selection = self.file_listbox.curselection()
+        if not selection: return
+
+        # Delete from source_files. 
+        # Must delete from highest index to lowest to avoid shifting issues.
+        for index in reversed(selection):
+            if index < len(self.source_files):
+                del self.source_files[index]
+        
+        # Refresh the displays
+        self.refresh_file_list_ui()
+        if self.upload_mode_var.get() == "custom":
+            self.refresh_upload_ui()
 
     def clear_files(self):
         self.source_files = []
@@ -621,7 +683,7 @@ class ConverterApp:
                 os.makedirs(out_dir, exist_ok=True)
                 generated_files = []
 
-                # FP8
+                # --- FP8 Logic ---
                 fp8_targets = ["FP8_E5M2", "FP8_E5M2 (All)", "FP8_E4M3FN", "FP8_E4M3FN (All)"]
                 for q in fp8_targets:
                     if q in gen_list or q in up_list:
@@ -654,8 +716,13 @@ class ConverterApp:
                             else:
                                 self.msg_queue.put(("UPDATE_GRID", model_base, q, "SKIP"))
 
-                # GGUF
-                all_gguf_active = [q for q in (gen_list + up_list) if "FP8" not in q]
+                # --- GGUF Logic ---
+                # FIX 1: Merge lists and use set() to remove duplicates (e.g. Q4 in Gen and Q4 in Up)
+                raw_combined = gen_list + up_list
+                unique_tasks = list(set(raw_combined))
+                
+                all_gguf_active = [q for q in unique_tasks if "FP8" not in q]
+                
                 if all_gguf_active:
                     gguf_gen_needed = [q for q in gen_list if "FP8" not in q]
                     gguf_src = None
@@ -668,13 +735,11 @@ class ConverterApp:
                             curr = f
                             dq = os.path.join(out_dir, f"{name}-dequant.safetensors")
                             if os.path.exists("dequantize_fp8v2.py"):
-                                # ADDED "-u" here
                                 self.run_cmd([sys.executable, "-u", "dequantize_fp8v2.py", "--src", f, "--dst", dq, "--strip-fp8", "--dtype", "fp16"])
                                 if os.path.exists(dq): 
                                     curr = dq; generated_files.append(dq)
                             
                             conv = os.path.join(out_dir, f"{name}-CONVERT.gguf")
-                            # ADDED "-u" here
                             self.run_cmd([sys.executable, "-u", "convert.py", "--src", curr, "--dst", conv])
                             if os.path.exists(conv): gguf_src = conv; generated_files.append(conv)
                         elif f.lower().endswith(".gguf"):
@@ -702,19 +767,18 @@ class ConverterApp:
                                 continue
 
                             unfixed = os.path.join(out_dir, f"{name}-{q}-UnFixed.gguf")
+                            # Run quantization
                             if self.run_cmd([self.quant_cmd, gguf_src, unfixed, q]):
                                 final = unfixed
                                 fixes = glob.glob("fix_5d_tensors_*.safetensors")
                                 if fixes:
                                     fixed = os.path.join(out_dir, f"{name}-{q}-FIXED.gguf")
-                                    # ADDED "-u" here
                                     self.run_cmd([sys.executable, "-u", "fix_5d_tensors.py", "--src", unfixed, "--dst", fixed, "--fix", fixes[0], "--overwrite"])
                                     if os.path.exists(fixed): final = fixed
                                 
                                 try: os.rename(final, expected_path); generated_files.append(expected_path)
                                 except: generated_files.append(final)
                                 
-                                # Cleanup UnFixed if successful
                                 if os.path.exists(unfixed) and os.path.abspath(unfixed) != os.path.abspath(expected_path):
                                     try: os.remove(unfixed)
                                     except: pass
@@ -724,11 +788,15 @@ class ConverterApp:
                                 self.msg_queue.put(("UPDATE_GRID", model_base, q, "ERROR"))
                         
                         elif q in up_list:
+                            # Only upload checked, so we just skip generation but mark done if file exists
                             if os.path.exists(expected_path):
                                 generated_files.append(expected_path)
                                 self.msg_queue.put(("UPDATE_GRID", model_base, q, "DONE"))
                             else:
                                 self.msg_queue.put(("UPDATE_GRID", model_base, q, "SKIP"))
+
+                # FIX 2: Ensure generated_files has no duplicates before passing to batch_results
+                generated_files = list(set(generated_files))
 
                 res_obj = { "name": name, "files": generated_files, "model_display": model_base, "src_path": f }
                 batch_results.append(res_obj)
@@ -920,6 +988,3 @@ if __name__ == "__main__":
     root = tk.Tk()
     app = ConverterApp(root)
     root.mainloop()
-
-
-
