@@ -792,7 +792,6 @@ class ConverterApp:
             
             files_to_upload = []
             for f in files:
-                # Intermediate exclusion logic for upload
                 if f.endswith("-CONVERT.gguf") or f.endswith("-UnFixed.gguf") or f.endswith("-dequant.safetensors"): continue
                 fname = os.path.basename(f)
                 should_upload = False
@@ -801,6 +800,10 @@ class ConverterApp:
                         should_upload = True
                         break
                 if should_upload: files_to_upload.append(f)
+
+            # FIX 2: Deduplicate the upload list.
+            # If the same file was added multiple times, it crashes the uploader.
+            files_to_upload = list(set(files_to_upload))
 
             fp8s = [f for f in files_to_upload if "FP8" in f]
             ggufs = [f for f in files_to_upload if "FP8" not in f]
@@ -811,6 +814,10 @@ class ConverterApp:
             sys.stderr = DualOutput(old_stderr, self.log_display)
             
             try:
+                # Log what we are trying to upload
+                if fp8s: logging.info(f"Uploading FP8: {len(fp8s)} files to {r_fp8}")
+                if ggufs: logging.info(f"Uploading GGUF: {len(ggufs)} files to {r_gguf}")
+
                 if fp8s and r_fp8: uploader.main(token=self.hf_token.get(), repo_id=r_fp8, local_paths_args=fp8s, dest_folder=d_fp8, non_interactive=True)
                 if ggufs and r_gguf: uploader.main(token=self.hf_token.get(), repo_id=r_gguf, local_paths_args=ggufs, dest_folder=d_gguf, non_interactive=True)
                 self.msg_queue.put(("UPDATE_GRID", disp, "Upload", "DONE"))
@@ -835,7 +842,6 @@ class ConverterApp:
                     should_keep = True
                     break
             
-            # Extra checks for Intermediates
             if keep_dequant and "-dequant.safetensors" in fname: should_keep = True
             if keep_convert and "-CONVERT.gguf" in fname: should_keep = True
 
@@ -914,4 +920,5 @@ if __name__ == "__main__":
     root = tk.Tk()
     app = ConverterApp(root)
     root.mainloop()
+
 
