@@ -504,7 +504,14 @@ class ConverterApp:
 
     def browse_out(self): self.out_dir_var.set(filedialog.askdirectory())
     def browse_python(self): 
-        f=filedialog.askopenfilename(filetypes=[("Python","python.exe")])
+        # Detect OS to determine what files to look for
+        if platform.system() == "Windows":
+            ftypes = [("Python Executable", "python.exe"), ("All Files", "*.*")]
+        else:
+            # On Linux/Mac, python binaries often have no extension
+            ftypes = [("Python Executable", "python3"), ("Python Executable", "python"), ("All Files", "*")]
+            
+        f = filedialog.askopenfilename(filetypes=ftypes)
         if f: self.python_path_var.set(os.path.normpath(f))
     
     def restart(self):
@@ -661,12 +668,14 @@ class ConverterApp:
                             curr = f
                             dq = os.path.join(out_dir, f"{name}-dequant.safetensors")
                             if os.path.exists("dequantize_fp8v2.py"):
-                                self.run_cmd([sys.executable, "dequantize_fp8v2.py", "--src", f, "--dst", dq, "--strip-fp8", "--dtype", "fp16"])
+                                # ADDED "-u" here
+                                self.run_cmd([sys.executable, "-u", "dequantize_fp8v2.py", "--src", f, "--dst", dq, "--strip-fp8", "--dtype", "fp16"])
                                 if os.path.exists(dq): 
                                     curr = dq; generated_files.append(dq)
                             
                             conv = os.path.join(out_dir, f"{name}-CONVERT.gguf")
-                            self.run_cmd([sys.executable, "convert.py", "--src", curr, "--dst", conv])
+                            # ADDED "-u" here
+                            self.run_cmd([sys.executable, "-u", "convert.py", "--src", curr, "--dst", conv])
                             if os.path.exists(conv): gguf_src = conv; generated_files.append(conv)
                         elif f.lower().endswith(".gguf"):
                             gguf_src = f
@@ -698,7 +707,8 @@ class ConverterApp:
                                 fixes = glob.glob("fix_5d_tensors_*.safetensors")
                                 if fixes:
                                     fixed = os.path.join(out_dir, f"{name}-{q}-FIXED.gguf")
-                                    self.run_cmd([sys.executable, "fix_5d_tensors.py", "--src", unfixed, "--dst", fixed, "--fix", fixes[0], "--overwrite"])
+                                    # ADDED "-u" here
+                                    self.run_cmd([sys.executable, "-u", "fix_5d_tensors.py", "--src", unfixed, "--dst", fixed, "--fix", fixes[0], "--overwrite"])
                                     if os.path.exists(fixed): final = fixed
                                 
                                 try: os.rename(final, expected_path); generated_files.append(expected_path)
