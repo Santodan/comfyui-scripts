@@ -45,7 +45,7 @@ check_and_restart_in_venv()
 
 # --- IMPORTS ---
 try:
-    import upload_to_hf_v4 as uploader
+    import upload_to_hf as uploader
     UPLOADER_AVAILABLE = True
 except ImportError:
     uploader = None
@@ -920,5 +920,6 @@ if __name__ == "__main__":
     root = tk.Tk()
     app = ConverterApp(root)
     root.mainloop()
+
 
 
