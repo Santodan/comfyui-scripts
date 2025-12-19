@@ -648,13 +648,6 @@ class ConverterApp:
 
     def run_main_logic(self, gen_list, up_list):
         try:
-            # Cleanup previous run tensor fix file
-            if os.path.exists("fix_5d_tensors_wan.safetensors"):
-                try:
-                    os.remove("fix_5d_tensors_wan.safetensors")
-                    logging.info("Startup Cleanup: Deleted old 'fix_5d_tensors_wan.safetensors'")
-                except: pass
-
             strategy = self.cleanup_mode.get()
             keep_list = [q for q, v in self.quant_vars_keep.items() if v.get()]
             keep_dequant = self.keep_dequant_var.get()
@@ -670,6 +663,19 @@ class ConverterApp:
 
             for f in self.source_files:
                 if self.stop_requested: break
+                
+                # --- FIX: CLEANUP BEFORE EVERY MODEL ---
+                # We must delete the fix file before starting a new model, 
+                # otherwise convert.py crashes on the second model.
+                fix_file = "fix_5d_tensors_wan.safetensors"
+                if os.path.exists(fix_file):
+                    try:
+                        os.remove(fix_file)
+                        logging.info(f"Loop Cleanup: Removed old '{fix_file}'")
+                    except Exception as e:
+                        logging.warning(f"Could not remove fix file: {e}")
+                # ---------------------------------------
+
                 model_base = os.path.basename(f)
                 name = re.sub(r'-(f16|F16|BF16|CONVERT|UnFixed|FIXED)$', '', os.path.splitext(model_base)[0], flags=re.IGNORECASE)
                 
@@ -717,7 +723,7 @@ class ConverterApp:
                                 self.msg_queue.put(("UPDATE_GRID", model_base, q, "SKIP"))
 
                 # --- GGUF Logic ---
-                # FIX 1: Merge lists and use set() to remove duplicates (e.g. Q4 in Gen and Q4 in Up)
+                # Deduplicate tasks
                 raw_combined = gen_list + up_list
                 unique_tasks = list(set(raw_combined))
                 
@@ -735,11 +741,13 @@ class ConverterApp:
                             curr = f
                             dq = os.path.join(out_dir, f"{name}-dequant.safetensors")
                             if os.path.exists("dequantize_fp8v2.py"):
+                                # Ensure -u is passed
                                 self.run_cmd([sys.executable, "-u", "dequantize_fp8v2.py", "--src", f, "--dst", dq, "--strip-fp8", "--dtype", "fp16"])
                                 if os.path.exists(dq): 
                                     curr = dq; generated_files.append(dq)
                             
                             conv = os.path.join(out_dir, f"{name}-CONVERT.gguf")
+                            # Ensure -u is passed
                             self.run_cmd([sys.executable, "-u", "convert.py", "--src", curr, "--dst", conv])
                             if os.path.exists(conv): gguf_src = conv; generated_files.append(conv)
                         elif f.lower().endswith(".gguf"):
@@ -767,12 +775,12 @@ class ConverterApp:
                                 continue
 
                             unfixed = os.path.join(out_dir, f"{name}-{q}-UnFixed.gguf")
-                            # Run quantization
                             if self.run_cmd([self.quant_cmd, gguf_src, unfixed, q]):
                                 final = unfixed
                                 fixes = glob.glob("fix_5d_tensors_*.safetensors")
                                 if fixes:
                                     fixed = os.path.join(out_dir, f"{name}-{q}-FIXED.gguf")
+                                    # Ensure -u is passed
                                     self.run_cmd([sys.executable, "-u", "fix_5d_tensors.py", "--src", unfixed, "--dst", fixed, "--fix", fixes[0], "--overwrite"])
                                     if os.path.exists(fixed): final = fixed
                                 
@@ -788,14 +796,13 @@ class ConverterApp:
                                 self.msg_queue.put(("UPDATE_GRID", model_base, q, "ERROR"))
                         
                         elif q in up_list:
-                            # Only upload checked, so we just skip generation but mark done if file exists
                             if os.path.exists(expected_path):
                                 generated_files.append(expected_path)
                                 self.msg_queue.put(("UPDATE_GRID", model_base, q, "DONE"))
                             else:
                                 self.msg_queue.put(("UPDATE_GRID", model_base, q, "SKIP"))
 
-                # FIX 2: Ensure generated_files has no duplicates before passing to batch_results
+                # Dedupe generated files list
                 generated_files = list(set(generated_files))
 
                 res_obj = { "name": name, "files": generated_files, "model_display": model_base, "src_path": f }
@@ -988,3 +995,4 @@ if __name__ == "__main__":
     root = tk.Tk()
     app = ConverterApp(root)
     root.mainloop()
+
